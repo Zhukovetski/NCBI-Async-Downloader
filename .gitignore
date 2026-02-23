@@ -1,0 +1,28 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.venv/
+venv/
+env/
+
+# IDE настройки
+.vscode/
+.idea/
+
+# Твои скачанные данные (ОБЯЗАТЕЛЬНО!)
+*.gz
+*.fna
+*.fastq
+*.state.json
+downloaded_files/
+test/
+
+# Логи
+*.log

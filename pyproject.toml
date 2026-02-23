@@ -1,0 +1,38 @@
+[project]
+name = "ncbiloader"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "aiolimiter>=1.2.1",
+    "biopython>=1.86",
+    "httpx[http2]>=0.28.1",
+    "loguru>=0.7.3",
+    "orjson>=3.11.7",
+    "pydantic>=2.12.5",
+    "rich>=14.3.2",
+    "typer>=0.24.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.4,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "icecream>=2.1.10",
+    "pip-licenses>=5.5.1",
+    "pytest>=9.0.2",
+    "ruff>=0.15.1",
+    "ty>=0.0.17",
+]
+
+[tool.uv]
+package = true
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.uv.sources]
+ncbiloader = { workspace = true }
