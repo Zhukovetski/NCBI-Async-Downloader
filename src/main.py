@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Valentin Zhukovetski
+# Licensed under the MIT License.
+
 import asyncio
 import os
 import zlib
@@ -8,8 +11,6 @@ from ncbiloader import NCBILoader
 
 
 async def save_stream_to_disk(loader, url, output_dir="."):
-    print(url)
-    # 1. Придумываем имя (отрезаем .gz)
     filename = url[0].rsplit("/", 1)[1]
     if filename.endswith(".gz"):
         out_name = filename[:-3]
@@ -19,60 +20,67 @@ async def save_stream_to_disk(loader, url, output_dir="."):
     out_path = os.path.join(output_dir, out_name)
     print(f"[*] Скачиваем и распаковываем в: {out_path}")
 
-    # 2. Создаем декомпрессор
     d = zlib.decompressobj(zlib.MAX_WBITS | 16)
 
-    # 3. Открываем файл на запись
     with open(out_path, "wb") as f:
-        # Получаем поток от твоего лоадера
         async for chunk in loader.stream(url):
-            # Декомпрессия
             data = d.decompress(chunk)
             if data:
                 f.write(data)
 
-        # Дописываем хвосты
         f.write(d.flush())
+
+
+def file_url_generator(filepath: str):
+    with open(filepath, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):  # Игнор пустых и комментов
+                yield line
 
 
 async def main(
     links: str | list[str],
+    stream: bool,
     threads: int = 3,
     silent: bool = False,
     timeout: int | float = 30.0,
     follow_redirects: bool = True,
+    stream_buffer_size: int = 500,
     http2: bool = False,
     verify: bool = False,
 ) -> None:
+
     async with NCBILoader(
         threads=threads,
         silent=silent,
         timeout=timeout,
         follow_redirects=follow_redirects,
+        stream_buffer_size=stream_buffer_size,
         http2=http2,
         verify=verify,
     ) as loader:
-        await save_stream_to_disk(loader, links)
-        # await loader.run(links)
-
-    # links = [
-    #     "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/001/405/GCA_000001405.15_GRCh38/seqs_for_alignment_pipelines.ucsc_ids/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz",
-    #     "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_rm.out.gz",
-    #     "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_translated_cds.faa.gz",
-    #     "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_cds_from_genomic.fna.gz",
-    #     "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_assembly_stats.txt",
-    # ]
-
-    # 3. Запускаем загрузку ВНУТРИ контекста монитора
+        if stream:
+            await loader.stream(links)
+        else:
+            await loader.run(links)
 
 
-def ncbiloader(
+def loader(
     links: list[str] = typer.Argument(..., help="Список URL для скачивания"),
+    stream: bool = typer.Option(False, "--stream, -s", help="Вывод потоком"),
     threads: int = typer.Option(3, "--threads", "-t", help="Количество потоков"),
-    silent: bool = typer.Option(False, "--silent", "-s", help="Без графики"),
+    silent: bool = typer.Option(False, "--silent", "-sl", help="Без графики"),
     timeout: int = 30,
-    follow_redirects: bool = True,
-    http2: bool = True,
+    follow_redirects: bool = typer.Option(
+        True, "--follow_redirects/--no-follow_redirects", "-fr/-nfr", help=""
+    ),
+    stream_buffer_size: int = typer.Option(
+        500, "--stream_buffer_size", "-sbs", help="Максимальный размер буфера"
+    ),
+    http2: bool = typer.Option(
+        True, "--http2/--no-http2", "-h2/-nh2", help="Включить поддержку HTTP/2"
+    ),
     verify: bool = False,
 ) -> None:
 
@@ -83,10 +91,12 @@ def ncbiloader(
         asyncio.run(
             main(
                 links=links,
+                stream=stream,
                 threads=threads,
                 silent=silent,
                 timeout=timeout,
                 follow_redirects=follow_redirects,
+                stream_buffer_size=stream_buffer_size,
                 http2=http2,
                 verify=verify,
             )
@@ -96,4 +106,4 @@ def ncbiloader(
 
 
 if __name__ == "__main__":
-    typer.run(ncbiloader)
+    typer.run(loader)
