@@ -51,13 +51,62 @@ ncbiloader = { workspace = true }
 # Указываем Ruff, где искать исходники для корректной сортировки импортов
 src = ["src"]
 line-length = 88
+target-version = "py314"
 
 [tool.ruff.lint]
-# Включаем стандартные правила (E, F) и Isort (I) для порядка импортов
-select = ["E", "F", "I", "N"]
+select = [
+    "E", "W",  # pycodestyle
+    "F",       # pyflakes
+    "I",       # isort
+    "UP",      # pyupgrade
+    "B",       # bugbear
+    "SIM",     # simplify
+    "C901",    # complex-structure
+    "ANN",     # annotations
+    "PTH",     # use-pathlib
+    "RET",     # return-statements
+    "RUF",     # ruff-specific
+    "N",       # pep8-naming
+]
 fixable = ["ALL"]
 
+ignore = [
+    "RUF001", # Проверка кириллических букв в строках
+    "RUF002", # Проверка кириллических букв в докстрингах
+    "RUF003", # Проверка кириллических букв в комментариях (твой случай)
+     "C901",
+     "W293",   # Blank line contains whitespace
+]
+
+[tool.ruff.format]
+# Использовать двойные кавычки (стандарт Black) или одинарные
+quote-style = "double"
+
+# Использовать пробелы вместо табуляции
+indent-style = "space"
+
+# Автоматически определять перенос строк (LF или CRLF)
+line-ending = "auto"
+
+# Автоматическое форматирование кода в docstrings
+docstring-code-format = true
+
+# Пропускать форматирование строк в коде (если нужно оставить как есть)
+skip-magic-trailing-comma = false
+
+preview = true # Включает экспериментальные улучшения форматировани
+
+[tool.ruff.lint.pydocstyle]
+convention = "google" # Или "numpy", определяет стиль документации
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10 # Порог сложности функции (C901)
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*" = ["ANN"]
+
 [tool.pyright]
+
 # Включаем анализ папки src
 include = ["src"]
 # Сообщаем Pyright, что src — это корень с исходным кодом
@@ -67,4 +116,4 @@ executionEnvironments = [
 # Настройки виртуального окружения для uv
 venvPath = "."
 venv = ".venv"
-typeCheckingMode = "strict" 
+typeCheckingMode = "strict"

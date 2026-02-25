@@ -18,7 +18,7 @@ from rich.progress import (
 
 
 class ProgressMonitor:
-    def __init__(self):
+    def __init__(self) -> None:
         # Настраиваем колонки: Имя, Бар, % , Размер, Скорость, Время
         self.progress = Progress(
             TextColumn("{task.fields.get('status', '')}"),
@@ -82,7 +82,7 @@ class ProgressMonitor:
         self.progress.start()
 
     def stop(self) -> None:
-        self.progress.stop
+        self.progress.stop()
 
     def __enter__(self) -> Self:
         self.progress.start()

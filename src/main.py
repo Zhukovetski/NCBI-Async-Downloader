@@ -32,7 +32,7 @@ async def save_stream_to_disk(loader, url, output_dir="."):
 
 
 def file_url_generator(filepath: str):
-    with open(filepath, "r") as f:
+    with open(filepath) as f:
         for line in f:
             line = line.strip()
             if line and not line.startswith("#"):  # Игнор пустых и комментов

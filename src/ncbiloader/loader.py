@@ -2,26 +2,26 @@
 # Licensed under the MIT License.
 
 import asyncio
+import hashlib
 import heapq
 import os
 import signal
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterable
 from pathlib import Path
 from types import TracebackType
-from typing import Iterable, Self
+from typing import Self
 
 import httpx
-import orjson
 from aiolimiter import AsyncLimiter
 
-from .models import Chunk
+from .models import Chunk, File
 from .monitor import ProgressMonitor
 
 
 class NCBILoader:
     queue: asyncio.Queue[Chunk]
     _stream_queue: asyncio.Queue[tuple[int, bytearray]]
-    workers: list[asyncio.Task[None]] = []
+    workers: list[asyncio.Task[None]]
 
     def __init__(
         self,
@@ -70,8 +70,7 @@ class NCBILoader:
                 else stream_buffer_size // self.MIN_CHUNK
             )
         )
-        self._get_expected_size: dict[str, int] = {}
-        self.file_states: dict[str, list[Chunk]] = {}
+        self.files: dict[str, File] = {}
         self.stop_add_task = asyncio.Event()
         self.stop_add_task.set()
         self.is_running = True
@@ -90,9 +89,8 @@ class NCBILoader:
         if self.monitor:
             self.monitor.log("[yellow]Сохранение состояния...[/]")
 
-        for filename in list(self.file_states.keys()):
-            chunks = self.file_states[filename]
-            if not all(c.current_pos > c.end for c in chunks):
+        for filename, file in list(self.files.items()):
+            if not all(c.current_pos > c.end for c in (file.chunks or [])):
                 self._save_state(filename)
 
     async def autosave(self) -> None:
@@ -104,19 +102,20 @@ class NCBILoader:
                 break
 
     def _save_state(self, filename: str) -> None:
-        if filename not in self.file_states:
-            return
 
+        if (file_obj := self.files.get(filename)) is None:
+            return
         try:
-            # Сериализуем список dataclass'ов
-            data = [c for c in self.file_states[filename]]
-            with open(self._get_state_path(filename), "wb") as f:
-                f.write(orjson.dumps(data))
+            path = self._get_state_path(filename)
+            path.write_bytes(file_obj.to_json())
+
         except Exception as e:
             if self.monitor:
                 self.monitor.log(f"[red]Ошибка сохранения {filename}: {e}[/]")
 
-    async def add_task_producer(self, links: Iterable[str]) -> None:
+    async def add_task_producer(
+        self, links: Iterable[str], expected_chesums: Iterable[str] | str | None
+    ) -> None:
         """Продюсер: Нарезает файлы и кидает в очередь"""
         for url in links:
             if not self.is_running:
@@ -124,44 +123,46 @@ class NCBILoader:
 
             try:
                 filename = url.rsplit("/", 1)[1]
-                chunks = []
+                file = None
                 state_path = self._get_state_path(filename)
+                total_size = 0
+
+                async with self.limiter:
+                    resp = await self.client.head(url)
+                    if resp.status_code >= 400:
+                        if self.monitor:
+                            self.monitor.log(
+                                f"[red]Ошибка {resp.status_code} для {filename}[/]"
+                            )
+                        continue  # Пропускаем этот файл
+                    total_size = int(resp.headers.get("Content-Length", 0))
 
                 # 1. Попытка восстановления
                 if not self._stream:
-                    if os.path.exists(state_path):
+                    if state_path.is_file():
                         try:
-                            with open(state_path, "rb") as f:
+                            with state_path.open("rb") as f:
                                 content = f.read()
                                 if content:
-                                    chunks = [Chunk(**c) for c in orjson.loads(content)]
+                                    file = File.from_json(content)
                         except Exception:
                             if self.monitor:
                                 self.monitor.log(f"[!] Битая история {filename}")
-                            chunks = []
+                            file = None
 
-                    elif os.path.exists(filename):
+                    elif state_path.is_file():
                         if self.monitor:
                             self.monitor.log(f"[red]{filename} уже существует![/]")
                         continue
 
                 # 2. Если не восстановили - создаем с нуля
-                if not chunks:
-                    async with self.limiter:
-                        resp = await self.client.head(url)
-                        if resp.status_code >= 400:
-                            if self.monitor:
-                                self.monitor.log(
-                                    f"[red]Ошибка {resp.status_code} для {filename}[/]"
-                                )
-                            continue  # Пропускаем этот файл
-                        total_size = int(resp.headers.get("Content-Length", 0))
 
+                if not file:
                     # Sparse file creation
                     if not self._stream:
                         if self.monitor:
                             self.monitor.log(f"[*] Новый: {filename}")
-                        with open(self._get_file_path(filename), "wb") as f:
+                        with self._get_file_path(filename).open("wb") as f:
                             f.truncate(total_size)
 
                     # Логика нарезки
@@ -171,33 +172,23 @@ class NCBILoader:
                         if not self._stream
                         else self.MIN_CHUNK
                     )
-                    # Пересчитываем parts, если файл маленький
-                    parts = (total_size + chunk_size - 1) // chunk_size
 
-                    for i in range(parts):
-                        start = i * chunk_size
-                        end = min((i + 1) * chunk_size - 1, total_size - 1)
-                        chunks.append(
-                            Chunk(
-                                url=url,
-                                start=start,
-                                end=end,
-                                current_pos=start,
-                                filename=filename,
-                            )
-                        )
-
+                    file = File(
+                        filename=filename,
+                        url=url,
+                        content_length=total_size,
+                        chunk_size=chunk_size,
+                    )
                 # 3. Регистрируем в UI и памяти
-                self.file_states[filename] = chunks
-                total_calc = chunks[-1].end + 1
-                self._get_expected_size[filename] = total_calc
+                self.files[filename] = file
+                chunks = file.chunks or []
                 if self.monitor:
                     # Важно: добавляем total_size
                     # Вычисляем его из чанков (на случай восстановления)
 
-                    self.monitor.add_file(filename, total_calc)
+                    self.monitor.add_file(filename, total_size)
 
-                    downloaded = sum(c.current_pos - c.start for c in chunks)
+                    downloaded = sum(c.size - 1 for c in chunks)
                     if downloaded > 0:
                         self.monitor.update(filename, downloaded)
 
@@ -233,7 +224,9 @@ class NCBILoader:
             downloaded_in_this_attempt = 0
             headers = {"Range": f"bytes={chunk.current_pos}-{chunk.end}"}
             try:
-                async with self.client.stream("GET", chunk.url, headers=headers) as r:
+                async with self.client.stream(
+                    "GET", self.files[chunk.filename].url, headers=headers
+                ) as r:
                     if r.status_code >= 400:
                         raise Exception(f"HTTP {r.status_code}")
 
@@ -318,7 +311,7 @@ class NCBILoader:
 
     async def stream_all(
         self, links: Iterable[str], expected_checksums: dict[str, str] | None = None
-    ) -> AsyncGenerator[tuple[str, AsyncGenerator[bytes, None]], None]:
+    ) -> AsyncGenerator[tuple[str, AsyncGenerator[bytes]]]:
         """
         Принимает итератор ссылок.
         Отдает последовательно пары: (имя_файла, генератор_байт_этого_файла).
@@ -339,22 +332,29 @@ class NCBILoader:
 
             yield filename, file_gen
 
-    async def stream(self, links: str | Iterable[str]) -> AsyncGenerator[bytes, None]:
+    async def stream(
+        self, url: str, expected_checksum: str | None = None
+    ) -> AsyncGenerator[bytes]:
         self._stream = True
-        self.producer_task = asyncio.create_task(self.run(links))
-        bytes_yielded = 0
+        self.producer_task = asyncio.create_task(self.run(url))
+        filename = url.rsplit("/", 1)[1]
+        md5_hasher = hashlib.md5()
         next_offset = 0
-        heap: list[
-            tuple[int, bytearray]
-        ] = []  # Куча для хранения чанков, пришедших раньше времени
+        heap: list[tuple[int, bytearray]] = []
+        # Куча для хранения чанков, пришедших раньше времени
         try:
             while self.is_running:
                 # 1. Если в куче уже есть следующий кусок - отдаем его
                 if heap and heap[0][0] == next_offset:
                     _, chunk_data = heapq.heappop(heap)
-                    yield bytes(chunk_data)
-                    lenght = len(chunk_data)
-                    bytes_yielded += lenght
+                    chunk_bytes = bytes(chunk_data)
+
+                    if expected_checksum:
+                        md5_hasher.update(chunk_bytes)
+
+                    yield chunk_bytes
+
+                    lenght = len(chunk_bytes)
                     next_offset += lenght
                     continue
 
@@ -387,9 +387,14 @@ class NCBILoader:
 
                 # 3. Пришел кусок. Это тот, который мы ждем?
                 if chunk_start == next_offset:
-                    yield bytes(chunk_data)
-                    lenght = len(chunk_data)
-                    bytes_yielded += lenght
+                    chunk_bytes = bytes(chunk_data)
+
+                    if expected_checksum:
+                        md5_hasher.update(chunk_bytes)
+
+                    yield chunk_bytes
+
+                    lenght = len(chunk_bytes)
                     next_offset += lenght
                 else:
                     # Это кусок из будущего. Сохраняем в кучу.
@@ -405,10 +410,29 @@ class NCBILoader:
                     and not heap
                     and self._stream_queue.empty()
                 ):
+                    # ПРОВЕРКА ЦЕЛОСТНОСТИ
+                    if expected_checksum:
+                        calculated = md5_hasher.hexdigest()
+                        if calculated != expected_checksum:
+                            err_msg = (
+                                f"CRITICAL: Integrity Check Failed!\n"
+                                f"Expected: {expected_checksum}\n"
+                                f"Got:      {calculated}"
+                            )
+                            if self.monitor:
+                                self.monitor.log(f"[bold red]{err_msg}[/]")
+
+                            # Бросаем исключение. Это прервет consumer-а.
+                            raise ValueError(err_msg)
+
+                        elif self.monitor:
+                            self.monitor.log(f"[green]MD5 Verified: {calculated}[/]")
                     break
-            if bytes_yielded != total_size:
+
+            total_size = self.files[filename]
+            if next_offset != total_size:
                 raise ValueError(
-                    f"Incomplete stream! Got {bytes_yielded} of {total_size}"
+                    f"Incomplete stream! Got {next_offset} of {total_size}"
                 )
 
         finally:
@@ -416,7 +440,11 @@ class NCBILoader:
                 self.producer_task.cancel()
             await asyncio.gather(self.producer_task, return_exceptions=True)
 
-    async def run(self, links: str | Iterable[str]) -> None:
+    async def run(
+        self,
+        links: str | Iterable[str],
+        expected_checksums: Iterable[str] | str | None = None,
+    ) -> None:
         if self.producer_task is None:
             self._stream = False
         if isinstance(links, str):
@@ -426,7 +454,9 @@ class NCBILoader:
             loop.add_signal_handler(sig, self.stop)
 
         # 1. Запускаем фоновые задачи
-        self.task_creator = asyncio.create_task(self.add_task_producer(links))
+        self.task_creator = asyncio.create_task(
+            self.add_task_producer(links, expected_checksums)
+        )
         if not self._stream:
             self.autosave_task = asyncio.create_task(self.autosave())
 
@@ -447,32 +477,27 @@ class NCBILoader:
 
             # Удаление стейтов
             if self.is_running and not self._stream:
-                for url in links:
-                    fname = url.rsplit("/", 1)[1]
-                    spath = self._get_state_path(fname)
-                    if os.path.exists(spath):
-                        os.remove(spath)
-            if self.is_running:  # Только если нас не остановили Ctrl+C
-                for url in links:  # Или пройтись по self.file_states
-                    filename = url.rsplit("/", 1)[1]
+                for fname in self.files:
+                    self._get_file_path(fname).unlink(missing_ok=True)
 
+            if self.is_running:  # Только если нас не остановили Ctrl+C
+                for fname, file in self.files.items():
+                    file_path = self._get_file_path(fname)
                     # 1. Проверяем физический размер файла
-                    if os.path.exists(filename):
-                        actual_size = os.path.getsize(filename)
-                        # Достаем ожидаемый размер из стейта или памяти
-                        # (Тебе нужно сохранить total_size где-то в self.file_meta[filename] при старте)
-                        expected_size = self._get_expected_size[filename]
+                    if file_path.is_file():
+                        actual_size = file_path.stat().st_size
+                        expected_size = file.content_length
 
                         if expected_size and actual_size != expected_size:
-                            err_msg = f"[!] Файл битый: {filename} ({actual_size} != {expected_size})"
+                            err_msg = f"[!] Файл битый: {fname} ({actual_size} != {expected_size})"
                             if self.monitor:
                                 self.monitor.log(f"[red]{err_msg}[/]")
                             raise ValueError(err_msg)
 
                         # Если все ок - красим в зеленый
                         if self.monitor:
-                            self.monitor.done(filename)  # Просто визуальный эффект!
-                            self.monitor.log(f"[green]OK: {filename}[/]")
+                            self.monitor.done(fname)  # Просто визуальный эффект!
+                            self.monitor.log(f"[green]OK: {fname}[/]")
 
         except asyncio.CancelledError:
             pass

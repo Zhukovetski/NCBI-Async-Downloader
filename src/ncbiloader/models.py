@@ -1,8 +1,9 @@
 # Copyright (c) 2026 Valentin Zhukovetski
 # Licensed under the MIT License.
 
-from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+
+import orjson
 
 
 @dataclass(slots=True)
@@ -24,23 +25,44 @@ class Chunk:
     def remaining(self) -> int:
         return max(0, self.end - self.current_pos + 1)
 
-    # Метод для красивого отображения в Range header
     def get_header(self) -> dict[str, str]:
         return {"Range": f"bytes={self.current_pos}-{self.end}"}
 
 
-@dataclass(slots=True)
+@dataclass
 class File:
     filename: str
     url: str
     content_length: int
-    chunks: List[Chunk] = field(default_factory=list[Chunk])
+    chunk_size: int
+    chunks: list[Chunk] = field(default_factory=list[Chunk])
 
     # Дополнительные поля (на будущее)
-    md5: Optional[str] = None
-    headers: Dict[str, str] = field(
+    md5: str | None = None
+    headers: dict[str, str] = field(
         default_factory=dict[str, str]
     )  # Например, Cookies или User-Agent
+
+    def __post_init__(self) -> None:
+        if self.chunks:
+            return
+
+        if self.chunk_size <= 0:
+            raise ValueError("Chunk size must be positive")
+        part_count = -(-self.content_length // self.chunk_size)
+
+        for i in range(part_count):
+            start = i * self.chunk_size
+            end = min((i + 1) * self.chunk_size - 1, self.content_length - 1)
+
+            self.chunks.append(
+                Chunk(
+                    start=start,
+                    end=end,
+                    current_pos=start,
+                    filename=self.filename,
+                )
+            )
 
     @property
     def is_complete(self) -> bool:
@@ -52,7 +74,7 @@ class File:
     @property
     def downloaded_size(self) -> int:
         """Сколько байт реально скачано (для Resume)"""
-        return sum(c.current_pos - c.start for c in self.chunks)
+        return sum(c.current_pos - c.start for c in (self.chunks or []))
 
     @property
     def progress(self) -> float:
@@ -63,17 +85,19 @@ class File:
 
     # --- СЕРИАЛИЗАЦИЯ (Магия для стейтов) ---
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_json(self) -> bytes:
         """Превращает объект в словарь для orjson"""
         # dataclasses.asdict работает рекурсивно, но иногда медленно.
         # Можно использовать его, или написать вручную для скорости.
-        return asdict(self)
+        return orjson.dumps(
+            self, option=orjson.OPT_SERIALIZE_DATACLASS | orjson.OPT_INDENT_2
+        )
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "File":
+    def from_json(cls, content: bytes) -> File:
         """Восстанавливает объект из словаря (Deserialization)"""
-        # Самое важное: восстановить вложенные объекты Chunk!
-        chunks_data = data.pop("chunks", [])
-        chunks_objs = [Chunk(**c_data) for c_data in chunks_data]
+        data = orjson.loads(content)
+        chunks_data = data.get("chunks", [])
+        chunks_data["chunks"] = [Chunk(**c_data) for c_data in chunks_data]
 
-        return cls(chunks=chunks_objs, **data)
+        return cls(**data)
