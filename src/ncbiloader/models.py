@@ -6,12 +6,12 @@ from dataclasses import dataclass, field
 import orjson
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, order=True)
 class Chunk:
-    filename: str
     start: int
-    end: int
-    current_pos: int
+    filename: str = field(compare=False)
+    end: int = field(compare=False)
+    current_pos: int = field(compare=False)
 
     @property
     def is_finished(self) -> bool:
@@ -20,6 +20,10 @@ class Chunk:
     @property
     def size(self) -> int:
         return self.end - self.start + 1
+
+    @property
+    def uploaded(self) -> int:
+        return self.current_pos - self.start + 1
 
     @property
     def remaining(self) -> int:
@@ -36,9 +40,8 @@ class File:
     content_length: int
     chunk_size: int
     chunks: list[Chunk] = field(default_factory=list[Chunk])
-
-    # Дополнительные поля (на будущее)
-    md5: str | None = None
+    expected_md5: str | None = None
+    verified: bool = False
     headers: dict[str, str] = field(
         default_factory=dict[str, str]
     )  # Например, Cookies или User-Agent
@@ -98,6 +101,6 @@ class File:
         """Восстанавливает объект из словаря (Deserialization)"""
         data = orjson.loads(content)
         chunks_data = data.get("chunks", [])
-        chunks_data["chunks"] = [Chunk(**c_data) for c_data in chunks_data]
+        data["chunks"] = [Chunk(**c_data) for c_data in chunks_data]
 
         return cls(**data)

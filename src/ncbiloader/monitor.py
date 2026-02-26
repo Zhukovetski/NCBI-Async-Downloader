@@ -21,11 +21,8 @@ class ProgressMonitor:
     def __init__(self) -> None:
         # Настраиваем колонки: Имя, Бар, % , Размер, Скорость, Время
         self.progress = Progress(
-            TextColumn("{task.fields.get('status', '')}"),
             TextColumn("[bold blue]{task.fields[filename]}", justify="right"),
-            BarColumn(
-                bar_width=None, complete_style="green", finished_style="bold green"
-            ),
+            BarColumn(bar_width=None, complete_style="red", finished_style="bold green"),
             "[progress.percentage]{task.percentage:>3.1f}%",
             "•",
             FileSizeColumn(),  # Сколько скачано
@@ -36,7 +33,7 @@ class ProgressMonitor:
             "•",
             TimeRemainingColumn(),
             expand=True,
-            transient=True,
+            refresh_per_second=10,
         )
 
         # Словарь для связи имени файла и ID задачи в Rich
@@ -53,9 +50,7 @@ class ProgressMonitor:
     def add_file(self, filename: str, total_size: int) -> None:
         """Регистрирует новый файл в UI"""
         if filename not in self.tasks:
-            task_id = self.progress.add_task(
-                "download", filename=filename, total=total_size, start=True
-            )
+            task_id = self.progress.add_task("download", filename=filename, total=total_size, start=True)
 
             self.tasks[filename] = task_id
 
@@ -71,11 +66,13 @@ class ProgressMonitor:
     def done(self, filename: str) -> None:
         if filename in self.tasks:
             task_id = self.tasks[filename]
+
+            # 1. Меняем описание (добавляем галочку)
             self.progress.update(
                 task_id,
-                status="[bold green]COMPLETE[/bold green]",
-                # Скрываем скорость и время, если они мешают
-                visible=True,
+                description=f"[bold green]✔ {filename}",
+                completed=self.progress.tasks[task_id].total,  # Принудительно 100%
+                style="green",  # Красим саму полоску
             )
 
     def start(self) -> None:

@@ -2,58 +2,46 @@
 # Licensed under the MIT License.
 
 import asyncio
-import os
-import zlib
+from typing import Annotated
 
 import typer
 
 from ncbiloader import NCBILoader
 
-
-async def save_stream_to_disk(loader, url, output_dir="."):
-    filename = url[0].rsplit("/", 1)[1]
-    if filename.endswith(".gz"):
-        out_name = filename[:-3]
-    else:
-        out_name = filename + ".unpacked"
-
-    out_path = os.path.join(output_dir, out_name)
-    print(f"[*] Скачиваем и распаковываем в: {out_path}")
-
-    d = zlib.decompressobj(zlib.MAX_WBITS | 16)
-
-    with open(out_path, "wb") as f:
-        async for chunk in loader.stream(url):
-            data = d.decompress(chunk)
-            if data:
-                f.write(data)
-
-        f.write(d.flush())
+# Создаем приложение Typer
+app = typer.Typer(add_completion=False)
 
 
-def file_url_generator(filepath: str):
-    with open(filepath) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#"):  # Игнор пустых и комментов
-                yield line
-
-
-async def main(
-    links: str | list[str],
+async def async_main(
+    links: list[str],
     stream: bool,
-    threads: int = 3,
-    silent: bool = False,
-    timeout: int | float = 30.0,
-    follow_redirects: bool = True,
-    stream_buffer_size: int = 500,
-    http2: bool = False,
-    verify: bool = False,
+    threads: int,
+    silent: bool,
+    output_dir: str,
+    md5: str | None,  # Принимаем один MD5 как строку
+    timeout: float,
+    follow_redirects: bool,
+    stream_buffer_size: int,
+    http2: bool,
+    verify: bool,
 ) -> None:
+
+    # Логика хешей для CLI:
+    # Если ссылка одна и хеш передан -> создаем словарь.
+    # Если ссылок много -> игнорируем (или можно кинуть ошибку).
+    expected_checksums: dict[str, str] = {}
+    if md5 and len(links) == 1:
+        expected_checksums[links[0]] = md5
+    elif md5 and len(links) > 1:
+        typer.secho(
+            "Предупреждение: Флаг --md5 игнорируется для нескольких ссылок.",
+            fg="yellow",
+        )
 
     async with NCBILoader(
         threads=threads,
         silent=silent,
+        output_dir=output_dir,
         timeout=timeout,
         follow_redirects=follow_redirects,
         stream_buffer_size=stream_buffer_size,
@@ -61,39 +49,70 @@ async def main(
         verify=verify,
     ) as loader:
         if stream:
-            await loader.stream(links)
+            # !!! ВАЖНО: Мы должны итерироваться по генератору, чтобы процесс шел !!!
+            async for filename, file_gen in loader.stream_all(links, expected_checksums):
+                if not silent:
+                    typer.secho(f"Стрим запущен: {filename}", fg="blue")
+
+                # Потребляем поток (иначе скачивание зависнет)
+                # Тут можно было бы писать в stdout или пайп, но пока просто крутим цикл
+                async for chunk in file_gen:
+                    pass  # Просто "съедаем" байты, чтобы работал механизм проверки хеша внутри
+
+                if not silent:
+                    typer.secho(f"Стрим завершен: {filename}", fg="green")
         else:
-            await loader.run(links)
+            # Обычный режим (на диск)
+            await loader.run(links, expected_checksums)
 
 
+H = {
+    "L": "Список URL для скачивания",
+    "M": "Ожидаемый MD5 (только для одной ссылки)",
+    "O": "Папка для сохранения",
+    "T": "Количество потоков",
+    "S": "Режим потоковой обработки (без сохранения)",
+    "SL": "Отключить GUI",
+    "TM": "Таймаут соединения",
+    "B": "Размер буфера стрима (байт)",
+    "H2": "Использовать HTTP/2",
+    "R": "Следовать редиректам",
+    "V": "Проверять размер файла после скачивания",
+}
+
+
+@app.command()
 def loader(
-    links: list[str] = typer.Argument(..., help="Список URL для скачивания"),
-    stream: bool = typer.Option(False, "--stream, -s", help="Вывод потоком"),
-    threads: int = typer.Option(3, "--threads", "-t", help="Количество потоков"),
-    silent: bool = typer.Option(False, "--silent", "-sl", help="Без графики"),
-    timeout: int = 30,
-    follow_redirects: bool = typer.Option(
-        True, "--follow_redirects/--no-follow_redirects", "-fr/-nfr", help=""
-    ),
-    stream_buffer_size: int = typer.Option(
-        500, "--stream_buffer_size", "-sbs", help="Максимальный размер буфера"
-    ),
-    http2: bool = typer.Option(
-        True, "--http2/--no-http2", "-h2/-nh2", help="Включить поддержку HTTP/2"
-    ),
-    verify: bool = False,
+    links: Annotated[list[str], typer.Argument(help=H["L"])],
+    # Options
+    md5: Annotated[str | None, typer.Option("--md5", help=H["M"])] = None,
+    output_dir: Annotated[str, typer.Option("-o", "--output", help=H["O"])] = "download",
+    threads: Annotated[int, typer.Option("-t", "--threads", help=H["T"])] = 3,
+    stream: Annotated[bool, typer.Option("-s", "--stream", help=H["S"])] = False,
+    silent: Annotated[bool, typer.Option(help=H["SL"])] = False,
+    # Технические настройки
+    timeout: Annotated[float, typer.Option(help=H["TM"])] = 30.0,
+    stream_buffer_size: Annotated[int, typer.Option("--buffer", help=H["B"])] = 5242880,
+    http2: Annotated[bool, typer.Option("--http2/--no-http2", help=H["H2"])] = True,
+    follow_redirects: Annotated[bool, typer.Option("--redirects/--no-redirects", help=H["R"])] = True,
+    verify: Annotated[bool, typer.Option("--verify/--no-verify", help=H["V"])] = True,
 ) -> None:
-
+    """
+    NCBI Async Downloader: Быстрый загрузчик геномных данных.
+    """
     if not links:
-        typer.secho("Нет ссылок для скачивания", color=typer.colors.RED, bold=True)
-        return
+        typer.secho("Нет ссылок для скачивания!", fg="red", bold=True)
+        raise typer.Exit(code=1)
+
     try:
         asyncio.run(
-            main(
+            async_main(
                 links=links,
                 stream=stream,
                 threads=threads,
                 silent=silent,
+                output_dir=output_dir,
+                md5=md5,
                 timeout=timeout,
                 follow_redirects=follow_redirects,
                 stream_buffer_size=stream_buffer_size,
@@ -102,8 +121,11 @@ def loader(
             )
         )
     except KeyboardInterrupt:
-        typer.echo("\nПрервано пользователем (CLI).", err=True)
+        typer.secho("\n⛔ Прервано пользователем.", fg="yellow")
+    except Exception as e:
+        typer.secho(f"\n💥 Критическая ошибка: {e}", fg="red", bold=True)
+        # raise e # Раскомментируй для отладки
 
 
 if __name__ == "__main__":
-    typer.run(loader)
+    app()
