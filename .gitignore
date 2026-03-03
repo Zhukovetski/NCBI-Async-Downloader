@@ -22,7 +22,8 @@ env/
 *.fastq
 *.state.json
 downloaded_files/
-test/
+download/
+musor/
 
 # Логи
 *.log

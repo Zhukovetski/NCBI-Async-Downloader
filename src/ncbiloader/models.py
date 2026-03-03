@@ -1,6 +1,8 @@
 # Copyright (c) 2026 Valentin Zhukovetski
 # Licensed under the MIT License.
 
+import contextlib
+import os
 from dataclasses import dataclass, field
 
 import orjson
@@ -33,7 +35,7 @@ class Chunk:
         return {"Range": f"bytes={self.current_pos}-{self.end}"}
 
 
-@dataclass
+@dataclass(slots=True)
 class File:
     filename: str
     url: str
@@ -42,9 +44,7 @@ class File:
     chunks: list[Chunk] = field(default_factory=list[Chunk])
     expected_md5: str | None = None
     verified: bool = False
-    headers: dict[str, str] = field(
-        default_factory=dict[str, str]
-    )  # Например, Cookies или User-Agent
+    fd: int | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.chunks:
@@ -86,15 +86,9 @@ class File:
             return 0.0
         return (self.downloaded_size / self.content_length) * 100
 
-    # --- СЕРИАЛИЗАЦИЯ (Магия для стейтов) ---
-
     def to_json(self) -> bytes:
         """Превращает объект в словарь для orjson"""
-        # dataclasses.asdict работает рекурсивно, но иногда медленно.
-        # Можно использовать его, или написать вручную для скорости.
-        return orjson.dumps(
-            self, option=orjson.OPT_SERIALIZE_DATACLASS | orjson.OPT_INDENT_2
-        )
+        return orjson.dumps(self, option=orjson.OPT_SERIALIZE_DATACLASS | orjson.OPT_INDENT_2)
 
     @classmethod
     def from_json(cls, content: bytes) -> File:
@@ -104,3 +98,10 @@ class File:
         data["chunks"] = [Chunk(**c_data) for c_data in chunks_data]
 
         return cls(**data)
+
+    def close_fd(self) -> None:
+        """Безопасное закрытие дескриптора"""
+        if self.fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(self.fd)
+            self.fd = None

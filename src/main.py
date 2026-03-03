@@ -1,10 +1,11 @@
 # Copyright (c) 2026 Valentin Zhukovetski
 # Licensed under the MIT License.
 
-import asyncio
+import sys
 from typing import Annotated
 
 import typer
+import uvloop
 
 from ncbiloader import NCBILoader
 
@@ -21,7 +22,7 @@ async def async_main(
     md5: str | None,  # Принимаем один MD5 как строку
     timeout: float,
     follow_redirects: bool,
-    stream_buffer_size: int,
+    stream_buffer_size: int | None,
     http2: bool,
     verify: bool,
 ) -> None:
@@ -49,20 +50,27 @@ async def async_main(
         verify=verify,
     ) as loader:
         if stream:
-            # !!! ВАЖНО: Мы должны итерироваться по генератору, чтобы процесс шел !!!
-            async for filename, file_gen in loader.stream_all(links, expected_checksums):
-                if not silent:
-                    typer.secho(f"Стрим запущен: {filename}", fg="blue")
+            # Проверяем, куда мы пишем.
+            # sys.stdout.isatty() == True, если это терминал (человек смотрит).
+            # sys.stdout.isatty() == False, если это труба (|) или файл (>).
+            stream_to_stdout = not sys.stdout.isatty()
 
-                # Потребляем поток (иначе скачивание зависнет)
-                # Тут можно было бы писать в stdout или пайп, но пока просто крутим цикл
+            async for _, file_gen in loader.stream_all(links, expected_checksums):
+                # typer.secho(f"Streaming: {filename}", fg="green", err=True)
+
                 async for chunk in file_gen:
-                    pass  # Просто "съедаем" байты, чтобы работал механизм проверки хеша внутри
+                    if stream_to_stdout:
+                        # Пишем сырые байты в stdout
+                        pass
+                    else:
+                        # Если юзер запустил --stream просто в консоли,
+                        # не надо гадить бинарниками в экран. Просто потребляем.
+                        sys.stdout.buffer.write(chunk)
 
-                if not silent:
-                    typer.secho(f"Стрим завершен: {filename}", fg="green")
+                # Важно: flush stdout после каждого файла
+                if stream_to_stdout:
+                    sys.stdout.buffer.flush()
         else:
-            # Обычный режим (на диск)
             await loader.run(links, expected_checksums)
 
 
@@ -89,10 +97,10 @@ def loader(
     output_dir: Annotated[str, typer.Option("-o", "--output", help=H["O"])] = "download",
     threads: Annotated[int, typer.Option("-t", "--threads", help=H["T"])] = 3,
     stream: Annotated[bool, typer.Option("-s", "--stream", help=H["S"])] = False,
-    silent: Annotated[bool, typer.Option(help=H["SL"])] = False,
+    silent: Annotated[bool, typer.Option("--silent", help=H["SL"])] = False,
     # Технические настройки
     timeout: Annotated[float, typer.Option(help=H["TM"])] = 30.0,
-    stream_buffer_size: Annotated[int, typer.Option("--buffer", help=H["B"])] = 5242880,
+    stream_buffer_size: Annotated[int | None, typer.Option("--buffer", help=H["B"])] = None,
     http2: Annotated[bool, typer.Option("--http2/--no-http2", help=H["H2"])] = True,
     follow_redirects: Annotated[bool, typer.Option("--redirects/--no-redirects", help=H["R"])] = True,
     verify: Annotated[bool, typer.Option("--verify/--no-verify", help=H["V"])] = True,
@@ -105,7 +113,7 @@ def loader(
         raise typer.Exit(code=1)
 
     try:
-        asyncio.run(
+        uvloop.run(
             async_main(
                 links=links,
                 stream=stream,
@@ -121,10 +129,10 @@ def loader(
             )
         )
     except KeyboardInterrupt:
-        typer.secho("\n⛔ Прервано пользователем.", fg="yellow")
+        typer.secho("\n⛔ Прервано пользователем.", fg="yellow", err=True)
     except Exception as e:
-        typer.secho(f"\n💥 Критическая ошибка: {e}", fg="red", bold=True)
-        # raise e # Раскомментируй для отладки
+        typer.secho(f"\n💥 Критическая ошибка: {e}", fg="red", bold=True, err=True)
+        # raise  # Раскомментируй для отладки
 
 
 if __name__ == "__main__":
