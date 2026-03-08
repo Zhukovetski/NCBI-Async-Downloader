@@ -3,6 +3,7 @@
 
 import asyncio
 import time
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
@@ -96,12 +97,20 @@ class ProgressMonitor:
     Manages the terminal UI and file-based logging for the download session.
 
     Provides a declarative Rich UI with live updates, global ETA, and a
-    fallback mechanism (silent mode) for headless server environments.
+    fallback mechanism ( mode) for headless server environments.
     """
 
-    def __init__(self, silent: bool = False, log_file: Path | str | None = "download.log") -> None:
-        self.silent = silent
+    def __init__(
+        self,
+        no_ui: bool = False,
+        quiet: bool = False,
+        log_file: Path | str | None = "download.log",
+    ) -> None:
+        self.no_ui = no_ui
+        self.quiet = quiet
         self.log_file = Path(log_file) if log_file else None
+        self.is_running = True
+        self._refresh = None
 
         # Route UI to stderr to keep stdout clean for data streams (Unix pipes)
         self.console = Console(stderr=True)
@@ -114,10 +123,16 @@ class ProgressMonitor:
         self._dynamic_title = ""
         self.total_files = 0
         self.active_files: set[str] = set()
+        self.remove_active_files: set[str] = set()
         self.files_completed = 0
         self._date_printed = False
+        self._buffer: dict[str, int] = defaultdict(int)
+        self.refresh_per_second = 10
+        self.renewal_rate = 1 / self.refresh_per_second
 
-        if not self.silent:
+        self.i = 0
+
+        if not (self.no_ui or self.quiet):
             self.progress = Progress(
                 SpinnerColumn("aesthetic"),
                 TextColumn("[bold yellow]{task.description}"),
@@ -148,7 +163,7 @@ class ProgressMonitor:
                 refresh_per_second=10,
             )
 
-    def log(self, message: str, status: STATUS = "INFO", progress: bool = False) -> None:
+    def log(self, message: str | Rule, status: STATUS = "INFO", progress: bool = False) -> None:
         """
         Universal logging method. Writes to the log file and conditionally
         renders to the terminal UI based on the operational mode.
@@ -158,48 +173,52 @@ class ProgressMonitor:
             status (STATUS): Severity level dictating UI formatting.
             progress (bool): If True, forces display in the UI even if it's an INFO message.
         """
-        if not getattr(self, "_date_printed", False):
-            current_date = datetime.now().strftime("%Y-%m-%d")
-            date_header = f"[bold cyan]📅 Date: {current_date}[/]"
-
-            self.console.print(Rule(date_header))
-            self._write_log(f"--- {current_date} ---")
-            self._date_printed = True
 
         timestamp = datetime.now().strftime("[%H:%M:%S]")
         formatted_msg = f"{timestamp} {message}"
 
         self._write_log(formatted_msg)
+        renderable = formatted_msg
 
-        match status.upper():
-            case "CRITICAL" | "INTERRUPT":
-                renderable = Panel(
-                    f"[bold red]⚠️ {message}[/]\n[dim white]Partial data may have been saved.",
-                    title="[bold red]Interrupted",
-                    border_style="red",
-                    expand=False,
-                )
-            case "ERROR":
-                renderable = Panel(
-                    f"[bold red]{message}[/]", title="Error", border_style="red", padding=(0, 1)
-                )
-            case "WARNING":
-                renderable = f"⚠️ [yellow]{formatted_msg}[/]"
-            case "INFO":
-                renderable = f"[white]{formatted_msg}[/]"
-            case "SUCCESS":
-                renderable = f"✅ [green]{formatted_msg}[/]"
-            case _:
-                renderable = message
+        if self.quiet:
+            return
 
-        if not self.silent:
-            if self.progress:
-                if progress or status in ["WARNING", "ERROR", "CRITICAL", "INTERRUPT"]:
-                    self.progress.console.print(renderable)
-            else:
-                self.console.print(renderable)
+        if self.progress:
+            match status.upper():
+                case "CRITICAL" | "INTERRUPT":
+                    renderable = Panel(
+                        f"[bold red]⚠️ {message}[/]\n[dim white]Partial data may have been saved.",
+                        title="[bold red]Interrupted",
+                        border_style="red",
+                        expand=False,
+                    )
+                case "ERROR":
+                    renderable = Panel(
+                        f"[bold red]{message}[/]", title="Error", border_style="red", padding=(0, 1)
+                    )
+                case "WARNING":
+                    renderable = f"⚠️ [yellow]{formatted_msg}[/]"
+                case "INFO":
+                    renderable = f"[white]{formatted_msg}[/]"
+                case "SUCCESS":
+                    renderable = f"✅ [green]{formatted_msg}[/]"
+                case _:
+                    renderable = message
+
+            if progress or status in ["WARNING", "ERROR", "CRITICAL", "INTERRUPT"]:
+                self.progress.console.print(renderable)
         else:
-            self.console.print(renderable)
+            self.console.print(Text.from_markup(str(renderable)).plain)
+
+    def _date_print(self) -> None:
+        if not getattr(self, "_date_printed", False):
+            current_date = datetime.now().strftime("%Y-%m-%d")
+            date_header = f"[bold cyan]📅 Date: {current_date}[/]"
+
+            if not (self.no_ui or self.quiet):
+                self.console.print(Rule(date_header))
+            self.log(f"--- {current_date} ---")
+            self._date_printed = True
 
     def _write_log(self, msg: str) -> None:
         """Appends a raw text message to the log file, stripping ANSI UI tags."""
@@ -217,6 +236,10 @@ class ProgressMonitor:
 
     def add_file(self, filename: str, total_size: int | None = None) -> None:
         """Registers a new file in the UI, keeping it hidden until data arrives."""
+        if total_size is not None:
+            self.total_bytes += total_size
+            self.total_files += 1
+
         if self.progress:
             t_filename = truncate_filename(filename)
             if total_size is None:
@@ -225,22 +248,34 @@ class ProgressMonitor:
                 task_id = self.progress.add_task(
                     "Download file", filename=t_filename, total=total_size, visible=False
                 )
-                self.total_bytes += total_size
-                self.total_files += 1
             self.tasks[filename] = task_id
             self._update_panel_title()
 
     def update(self, filename: str, advance_bytes: int) -> None:
-        """Updates the downloaded byte count and makes the task visible if active."""
-        if not self.live:
-            return
+        """Instantly writes bytes to the memory buffer."""
 
+        self._buffer[filename] += advance_bytes
         self.download_bytes += advance_bytes
-        if self.progress and filename in self.tasks:
-            self.progress.update(self.tasks[filename], advance=advance_bytes, visible=True)
-            if filename not in self.active_files:
-                self.active_files.add(filename)
-                self._update_panel_title()
+
+    async def _refresh_loop(self) -> None:
+        """Resets the accumulated buffer in the UI (Rich)"""
+
+        if self.progress:
+            while self.is_running:
+                try:
+                    current_batch = self._buffer.copy()
+                    self._buffer.clear()
+
+                    for filename, bytes_to_advance in current_batch.items():
+                        if bytes_to_advance > 0 and filename in self.tasks:
+                            self.progress.update(self.tasks[filename], advance=bytes_to_advance, visible=True)
+                            if filename not in self.active_files:
+                                self.active_files.add(filename)
+                                self._update_panel_title()
+
+                    await asyncio.sleep(self.renewal_rate)
+                except Exception as e:
+                    self.log(f"UI Refresh Error: {e!r}", status="ERROR")
 
     def _update_panel_title(self) -> None:
         """Re-evaluates the active task count and updates the dynamic title string."""
@@ -262,14 +297,16 @@ class ProgressMonitor:
             task_id = self.tasks[filename]
             self.progress.update(task_id, completed=self.progress.tasks[task_id].total, visible=False)
             del self.tasks[filename]
+            self.active_files.discard(filename)
 
             if self.progress.tasks[task_id].total is not None:
                 self.files_completed += 1
-                self.log(f"Done: {filename}", status="SUCCESS", progress=True)
-                self.active_files.remove(filename)
                 self._update_panel_title()
+                self.log(f"Done: {filename}", status="SUCCESS", progress=True)
 
         else:
+            if self._buffer.get(filename, 0):
+                self.files_completed += 1
             self.log(f"Done: {filename}", status="SUCCESS", progress=True)
 
     def _make_panel(self) -> Panel | str:
@@ -309,7 +346,7 @@ class ProgressMonitor:
         else:
             size_str = (
                 f"{self.download_bytes / 1024 / 1024 / 1024:.2f} /"
-                f"{self.total_bytes / 1024 / 1024 / 1024:.2f} GB"
+                f" {self.total_bytes / 1024 / 1024 / 1024:.2f} GB"
             )
 
         # Trigger final report rendering if all tasks are complete
@@ -319,7 +356,7 @@ class ProgressMonitor:
             grid.add_column(justify="center")
 
             content = Group("[green]✅ All downloads completed successfully!\n", grid)
-            grid.add_row("[white]Total files:", f"[green3]{self.total_files}[/]")
+            grid.add_row("[white]Total files:", f"[green3]{self.files_completed}/{self.total_files}[/]")
             grid.add_row("[white]Total Data:", f"[bold cyan]{size_str}[/]")
             grid.add_row("[white]Average Speed:", f"[bold yellow]{speed_str}[/]")
             grid.add_row("[white]Total Time:", f"[bold magenta]{time_str}[/]")
@@ -342,8 +379,10 @@ class ProgressMonitor:
 
     def handle_exit(self, cancelled: bool = False) -> None:
         """Closes the UI and logs the session end, generating a summary report."""
-        if not self.silent:
+        if self.progress:
             self.live.stop()
+            if self._refresh:
+                self._refresh.cancel()
 
         elapsed = time.monotonic() - self.start_time
         avg_speed = (self.download_bytes / elapsed) / 1024 / 1024 if elapsed > 0 else 0
@@ -357,7 +396,7 @@ class ProgressMonitor:
 
         report = (
             f"\n--- Final Report ({status_word}) ---\n"
-            f"Total files:   {self.total_files}\n"
+            f"Total files:   {self.files_completed}/{self.total_files}\n"
             f"Total Data:    {total_mb:.2f} MB\n"
             f"Average Speed: {avg_speed:.2f} MB/s\n"
             f"Total Time:    {time_str}\n"
@@ -370,8 +409,10 @@ class ProgressMonitor:
         """Initializes the display engine and internal timers."""
         if self.progress:
             self.live.start()
+            self._refresh = asyncio.create_task(self._refresh_loop())
         self.start_time = time.monotonic()
         self._write_log("--- Session Started ---")
+        self._date_print()
 
     def stop(self) -> None:
         """Manually stops the monitor."""
@@ -381,8 +422,10 @@ class ProgressMonitor:
     def __enter__(self) -> Self:
         if self.progress:
             self.live.start()
+            self._refresh = asyncio.create_task(self._refresh_loop())
         self.start_time = time.monotonic()
         self._write_log("--- Session Started ---")
+        self._date_print()
         return self
 
     def __exit__(
@@ -391,6 +434,7 @@ class ProgressMonitor:
         _exc: BaseException | None = None,
         _tb: TracebackType | None = None,
     ) -> None:
+        print("2")
         is_cancelled = _exc_type in (KeyboardInterrupt, asyncio.CancelledError)
         self.handle_exit(cancelled=is_cancelled)
         self._write_log("--- Session Finished ---")

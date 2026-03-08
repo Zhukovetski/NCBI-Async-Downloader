@@ -17,7 +17,8 @@ async def async_main(
     links: list[str],
     stream: bool,
     threads: int,
-    silent: bool,
+    no_ui: bool,
+    quiet: bool,
     output_dir: str,
     md5: str | None,
     chunk_timeout: int,
@@ -30,7 +31,8 @@ async def async_main(
         links (list[str]): List of target URLs.
         stream (bool): Whether to stream data to stdout instead of writing to disk.
         threads (int): Maximum number of concurrent download threads.
-        silent (bool): Disables the rich UI if set to True.
+        no_ui (bool): Disable GUI (plain text logs only) if set to True.
+        quiet (bool): Dead silence. No console output at all if set to True.
         output_dir (str): Destination directory for downloaded files.
         md5 (str | None): Expected MD5 checksum (only evaluated if a single link is provided).
         chunk_timeout (float): Timeout in seconds for individual chunk requests.
@@ -48,7 +50,8 @@ async def async_main(
 
     async with NCBILoader(
         threads=threads,
-        silent=silent,
+        no_ui=no_ui,
+        quiet=quiet,
         output_dir=output_dir,
         stream_buffer_size=stream_buffer_size,
         chunk_timeout=chunk_timeout,
@@ -95,8 +98,11 @@ def cli(
             "-s", "--stream", help="Enable streaming mode (outputs to stdout without saving to disk)."
         ),
     ] = False,
-    silent: Annotated[
-        bool, typer.Option("--silent", help="Disable graphical user interface (GUI) and progress bars.")
+    no_ui: Annotated[
+        bool, typer.Option("--no-ui", "-nu", help="Disable GUI (plain text logs only) if set to True")
+    ] = False,
+    quiet: Annotated[
+        bool, typer.Option("--quiet", "-q", help="Dead silence. No console output at all.")
     ] = False,
     chunk_timeout: Annotated[
         int, typer.Option(help="Connection timeout in seconds for chunk downloads.")
@@ -122,7 +128,8 @@ def cli(
                 links=links,
                 stream=stream,
                 threads=threads,
-                silent=silent,
+                no_ui=no_ui,
+                quiet=quiet,
                 output_dir=output_dir,
                 md5=md5,
                 chunk_timeout=chunk_timeout,

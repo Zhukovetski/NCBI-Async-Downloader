@@ -33,14 +33,15 @@ class NCBILoader:
     def __init__(
         self,
         threads: int = 3,
-        silent: bool = False,
+        no_ui: bool = False,
+        quiet: bool = False,
         output_dir: str = "download",
         stream_buffer_size: int | None = None,
         chunk_timeout: int = 120,
         client_kwargs: dict[str, Any] | None = None,
     ) -> None:
 
-        self._monitor = ProgressMonitor(silent=silent, log_file=f"{output_dir}/session.log")
+        self._monitor = ProgressMonitor(no_ui=no_ui, quiet=quiet, log_file=f"{output_dir}/session.log")
         self.network = NetworkClient(threads=threads, monitor=self._monitor, client_kwargs=client_kwargs)
         self.storage = StorageManager(output_dir=output_dir)
         self.ncbi = NCBIProvider(network=self.network)
@@ -51,7 +52,7 @@ class NCBILoader:
         self._stream = None
         self._stream_buffer_size = stream_buffer_size
         self.stream_chunk_size = 5 * 1024 * 1024
-        self.MIN_CHUNK = 1024 * 1024
+        self.MIN_CHUNK = 5 * 1024 * 1024
         self._semaphore = asyncio.Semaphore(threads)
 
         self._queue = asyncio.PriorityQueue()
@@ -189,7 +190,9 @@ class NCBILoader:
                     file_obj = self.files.get(filename)
 
                     if file_obj and file_obj.is_complete:
+                        print("1")
                         if file_obj.expected_md5 and not file_obj.verified:
+                            print("2")
                             file_obj.verified = True
                             self._monitor.log(f"Verifying MD5 checksum for {filename}...", status="INFO")
                             try:
