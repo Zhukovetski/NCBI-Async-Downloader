@@ -8,17 +8,14 @@ authors = [
 ]
 classifiers = [
     "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
 ]
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 dependencies = [
     "aiolimiter>=1.2.1",
-    "biopython>=1.86",
     "httpx[http2]>=0.28.1",
-    "loguru>=0.7.3",
     "orjson>=3.11.7",
-    "pydantic>=2.12.5",
     "rich>=14.3.2",
     "typer>=0.24.1",
     "uvloop>=0.22.1",
@@ -38,11 +35,17 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "respx>=0.22.0",
     "ruff>=0.15.1",
-    "ty>=0.0.17",
 ]
+
+[project.scripts]
+ncbiloader = "ncbiloader.main:app"
+
 
 [tool.uv]
 package = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.setuptools.package-dir]
 "" = "src"
@@ -54,7 +57,7 @@ ncbiloader = { workspace = true }
 # Указываем Ruff, где искать исходники для корректной сортировки импортов
 src = ["src"]
 line-length = 110
-target-version = "py314"
+target-version = "py311"
 
 
 [tool.ruff.lint]

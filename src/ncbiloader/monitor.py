@@ -123,14 +123,11 @@ class ProgressMonitor:
         self._dynamic_title = ""
         self.total_files = 0
         self.active_files: set[str] = set()
-        self.remove_active_files: set[str] = set()
         self.files_completed = 0
         self._date_printed = False
         self._buffer: dict[str, int] = defaultdict(int)
         self.refresh_per_second = 10
         self.renewal_rate = 1 / self.refresh_per_second
-
-        self.i = 0
 
         if not (self.no_ui or self.quiet):
             self.progress = Progress(
@@ -163,7 +160,7 @@ class ProgressMonitor:
                 refresh_per_second=10,
             )
 
-    def log(self, message: str | Rule, status: STATUS = "INFO", progress: bool = False) -> None:
+    async def log(self, message: str | Rule, status: STATUS = "INFO", progress: bool = False) -> None:
         """
         Universal logging method. Writes to the log file and conditionally
         renders to the terminal UI based on the operational mode.
@@ -177,7 +174,8 @@ class ProgressMonitor:
         timestamp = datetime.now().strftime("[%H:%M:%S]")
         formatted_msg = f"{timestamp} {message}"
 
-        self._write_log(formatted_msg)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._write_log, formatted_msg)
         renderable = formatted_msg
 
         if self.quiet:
@@ -210,14 +208,14 @@ class ProgressMonitor:
         else:
             self.console.print(Text.from_markup(str(renderable)).plain)
 
-    def _date_print(self) -> None:
+    async def _date_print(self) -> None:
         if not getattr(self, "_date_printed", False):
             current_date = datetime.now().strftime("%Y-%m-%d")
             date_header = f"[bold cyan]📅 Date: {current_date}[/]"
 
             if not (self.no_ui or self.quiet):
                 self.console.print(Rule(date_header))
-            self.log(f"--- {current_date} ---")
+            await self.log(f"--- {current_date} ---")
             self._date_printed = True
 
     def _write_log(self, msg: str) -> None:
@@ -275,7 +273,7 @@ class ProgressMonitor:
 
                     await asyncio.sleep(self.renewal_rate)
                 except Exception as e:
-                    self.log(f"UI Refresh Error: {e!r}", status="ERROR")
+                    await self.log(f"UI Refresh Error: {e!r}", status="ERROR")
 
     def _update_panel_title(self) -> None:
         """Re-evaluates the active task count and updates the dynamic title string."""
@@ -291,7 +289,7 @@ class ProgressMonitor:
             f"[blue]{self.total_files}[/] Files | [yellow]{active} Active[/]"
         )
 
-    def done(self, filename: str) -> None:
+    async def done(self, filename: str) -> None:
         """Marks a file task as complete, hides its progress bar, and updates metrics."""
         if self.progress and filename in self.tasks:
             task_id = self.tasks[filename]
@@ -302,12 +300,12 @@ class ProgressMonitor:
             if self.progress.tasks[task_id].total is not None:
                 self.files_completed += 1
                 self._update_panel_title()
-                self.log(f"Done: {filename}", status="SUCCESS", progress=True)
+                await self.log(f"Done: {filename}", status="SUCCESS", progress=True)
 
         else:
             if self._buffer.get(filename, 0):
                 self.files_completed += 1
-            self.log(f"Done: {filename}", status="SUCCESS", progress=True)
+            await self.log(f"Done: {filename}", status="SUCCESS", progress=True)
 
     def _make_panel(self) -> Panel | str:
         """
@@ -377,7 +375,7 @@ class ProgressMonitor:
             self.progress, title=self._dynamic_title + dynamic_title_full, border_style="blue", padding=(1, 2)
         )
 
-    def handle_exit(self, cancelled: bool = False) -> None:
+    async def handle_exit(self, cancelled: bool = False) -> None:
         """Closes the UI and logs the session end, generating a summary report."""
         if self.progress:
             self.live.stop()
@@ -403,38 +401,37 @@ class ProgressMonitor:
             f"--------------------------------"
         )
 
-        self.log(report)
+        await self.log(report)
 
-    def start(self) -> None:
+    async def start(self) -> None:
         """Initializes the display engine and internal timers."""
         if self.progress:
             self.live.start()
             self._refresh = asyncio.create_task(self._refresh_loop())
         self.start_time = time.monotonic()
         self._write_log("--- Session Started ---")
-        self._date_print()
+        await self._date_print()
 
-    def stop(self) -> None:
+    async def stop(self) -> None:
         """Manually stops the monitor."""
-        self.handle_exit()
+        await self.handle_exit()
         self._write_log("--- Session Finished ---")
 
-    def __enter__(self) -> Self:
+    async def __aenter__(self) -> Self:
         if self.progress:
             self.live.start()
             self._refresh = asyncio.create_task(self._refresh_loop())
         self.start_time = time.monotonic()
         self._write_log("--- Session Started ---")
-        self._date_print()
+        await self._date_print()
         return self
 
-    def __exit__(
+    async def __aexit__(
         self,
         _exc_type: type[BaseException] | None = None,
         _exc: BaseException | None = None,
         _tb: TracebackType | None = None,
     ) -> None:
-        print("2")
         is_cancelled = _exc_type in (KeyboardInterrupt, asyncio.CancelledError)
-        self.handle_exit(cancelled=is_cancelled)
+        await self.handle_exit(cancelled=is_cancelled)
         self._write_log("--- Session Finished ---")

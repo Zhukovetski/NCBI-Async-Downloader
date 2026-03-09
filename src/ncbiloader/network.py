@@ -95,17 +95,6 @@ class DynamicRateLimiter:
         self._circuit_broken_until: float = 0.0
         self.cooldown_seconds = cooldown_seconds
 
-    async def scale_down(self) -> None:
-        """Called when we hit 429"""
-        async with self._lock:
-            self._last_429_time = time.time()  # Start the clock
-            new_rps = max(self.min_rps, int(self.current_rps * 0.5))
-
-            if new_rps != self.current_rps:
-                self.current_rps = new_rps
-                # Re-initialize the internal limiter with new rate
-                self._limiter = AsyncLimiter(new_rps, 1)
-
     async def report_429(self, monitor: ProgressMonitor, retry_after: float | None = None) -> None:
         """Throttles or Breaks the circuit."""
         async with self._lock:
@@ -117,7 +106,7 @@ class DynamicRateLimiter:
             # If we are already at MIN speed and still getting 429s -> BREAK CIRCUIT
             if self.current_rps <= self.min_rps or retry_after is not None:
                 self._circuit_broken_until = now + break_duration
-                monitor.log(
+                await monitor.log(
                     f"!!! CIRCUIT BREAKER !!!"
                     f"Server requested {break_duration:.0f}s pause. All workers sleeping...",
                     status="WARNING",
@@ -129,7 +118,7 @@ class DynamicRateLimiter:
             if new_rps < self.current_rps:
                 self.current_rps = new_rps
                 self._limiter = AsyncLimiter(new_rps, 1)
-                monitor.log(f"429 detected. Throttling to {new_rps} RPS", status="WARNING")
+                await monitor.log(f"429 detected. Throttling to {new_rps} RPS", status="WARNING")
 
     async def try_scale_up(self) -> bool:
         """
@@ -208,7 +197,7 @@ class NetworkClient:
 
         if response is not None:
             if response.status_code not in retry_codes:
-                self.monitor.log(f"Fatal HTTP error {response.status_code} for {url}", status="ERROR")
+                await self.monitor.log(f"Fatal HTTP error {response.status_code} for {url}", status="ERROR")
                 return None
 
             server_delay = self._get_retry_after(response)
@@ -216,7 +205,7 @@ class NetworkClient:
                 await self.rate_limiter.report_429(self.monitor, server_delay)
 
             delay = server_delay if server_delay is not None else random.uniform(0, 2**attempt)
-            self.monitor.log(
+            await self.monitor.log(
                 f"Attempt {attempt} failed ({response.status_code}) for {url}. Retrying in {delay:.2f}s...",
                 status="WARNING",
             )
@@ -225,13 +214,13 @@ class NetworkClient:
         if exc is not None:
             if isinstance(exc, (httpx.RequestError, TimeoutError, asyncio.TimeoutError)):
                 delay = random.uniform(0, 2**attempt)
-                self.monitor.log(
+                await self.monitor.log(
                     f"Network issue ({type(exc).__name__}) on {url}. Retrying in {delay:.2f}s...",
                     status="WARNING",
                 )
                 return delay
 
-            self.monitor.log(f"Unrecoverable request error for {url}: {exc}", status="ERROR")
+            await self.monitor.log(f"Unrecoverable request error for {url}: {exc}", status="ERROR")
             return None
 
         return None
@@ -304,8 +293,11 @@ class NetworkClient:
 
                             delay = await self._evaluate_failure(url, attempt, response=response, exc=None)
 
-                except Exception as exc:
+                except (httpx.RequestError, TimeoutError) as exc:
                     delay = await self._evaluate_failure(url, attempt, response=None, exc=exc)
+
+                except Exception:
+                    raise
 
             if delay is None:
                 if response is not None:
@@ -330,7 +322,7 @@ class NetworkClient:
             parsed_date = email.utils.parsedate_tz(header)
             if parsed_date:
                 return max(0, email.utils.mktime_tz(parsed_date) - time.time())
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             pass
         return None
 

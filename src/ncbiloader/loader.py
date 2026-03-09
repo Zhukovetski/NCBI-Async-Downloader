@@ -52,7 +52,7 @@ class NCBILoader:
         self._stream = None
         self._stream_buffer_size = stream_buffer_size
         self.stream_chunk_size = 5 * 1024 * 1024
-        self.MIN_CHUNK = 5 * 1024 * 1024
+        self.MIN_CHUNK = 1 * 1024 * 1024
         self._semaphore = asyncio.Semaphore(threads)
 
         self._queue = asyncio.PriorityQueue()
@@ -61,6 +61,7 @@ class NCBILoader:
         self._stream_queue = asyncio.Queue(maxsize)
         self.files: dict[str, File] = {}
         self.heap: list[tuple[int, bytearray]] = []
+        self.heap_size = maxsize - self._max_conns
         self.condition = asyncio.Condition()
         self.is_running = True
         self.workers = []
@@ -72,7 +73,7 @@ class NCBILoader:
         while self.is_running:
             try:
                 await asyncio.sleep(60)
-                self.storage.save_all_states(self.files)
+                await self.storage.save_all_states(self.files)
             except asyncio.CancelledError:
                 break
 
@@ -99,20 +100,22 @@ class NCBILoader:
                 response = await self.network.safe_request("Head", url=url)
 
                 if response is None:
-                    self._monitor.log(f"Skipping {filename} due to unreachable remote.", status="ERROR")
+                    await self._monitor.log(f"Skipping {filename} due to unreachable remote.", status="ERROR")
                     continue
 
                 total_size = int(response.headers.get("content-length", 0))
 
                 if total_size <= 0:
-                    self._monitor.log(f"Invalid Content-Length ({total_size}) for {filename}", status="ERROR")
+                    await self._monitor.log(
+                        f"Invalid Content-Length ({total_size}) for {filename}", status="ERROR"
+                    )
                     continue
 
                 # Auto-fetch MD5 if missing
                 if not md5_val:
                     self._monitor.add_file(filename)
                     md5_val = await self.providers.get_expected_hash(url, filename)
-                    self._monitor.done(filename)
+                    await self._monitor.done(filename)
 
                 # 1. State Recovery
                 if not self._stream:
@@ -127,7 +130,13 @@ class NCBILoader:
                 # 3. File object creation
                 if not file:
                     if not self._stream:
-                        self.storage.create_sparse_file(filename=filename, size=total_size)
+                        new_filename = self.storage.create_sparse_file(filename=filename, size=total_size)
+                        if new_filename:
+                            await self._monitor.log(
+                                f"{filename} already exists. The new file will be saved as {new_filename}.",
+                                status="WARNING",
+                            )
+                            filename = new_filename
 
                     file = File(
                         filename=filename,
@@ -160,7 +169,7 @@ class NCBILoader:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self._monitor.log(f"Failed to process URL {url}: {e}", status="ERROR")
+                await self._monitor.log(f"Failed to process URL {url}: {e}", status="ERROR")
                 # Do not raise here; allow the producer to move to the next URL
 
     async def _download_worker(self) -> None:
@@ -190,22 +199,23 @@ class NCBILoader:
                     file_obj = self.files.get(filename)
 
                     if file_obj and file_obj.is_complete:
-                        print("1")
                         if file_obj.expected_md5 and not file_obj.verified:
-                            print("2")
                             file_obj.verified = True
-                            self._monitor.log(f"Verifying MD5 checksum for {filename}...", status="INFO")
+                            await self._monitor.log(
+                                f"Verifying MD5 checksum for {filename}...", status="INFO"
+                            )
                             try:
-                                self.storage.verify_file_hash(file_obj)
-                                self._monitor.log(f"Integrity confirmed: {filename}", status="SUCCESS")
+                                loop = asyncio.get_event_loop()
+                                await loop.run_in_executor(None, self.storage.verify_file_hash, file_obj)
+                                await self._monitor.log(f"Integrity confirmed: {filename}", status="SUCCESS")
                             except ValueError as ve:
-                                self._monitor.log(str(ve), status="ERROR")
+                                await self._monitor.log(str(ve), status="ERROR")
                                 # Optional: Add logic to quarantine/delete corrupted files here
 
                         file_obj.close_fd()
                         self.storage.verify_size(file_obj)
                         self.storage.delete_state(filename)
-                        self._monitor.done(filename)
+                        await self._monitor.done(filename)
                         self._queue.task_done()
                         del self.files[filename]
 
@@ -258,9 +268,9 @@ class NCBILoader:
                             downloaded_in_this_attempt += len(data)
                             buffer.extend(data)
                             self._monitor.update(chunk.filename, len(data))
-                        if len(self.heap) > 20:
+                        if len(self.heap) > self.heap_size:
                             async with self.condition:
-                                await self.condition.wait_for(lambda: len(self.heap) <= 20)
+                                await self.condition.wait_for(lambda: len(self.heap) <= self.heap_size)
                         await self._stream_queue.put((chunk.current_pos, buffer))
                         chunk.current_pos = chunk.current_pos + len(buffer)
                         buffer = bytearray()
@@ -287,7 +297,7 @@ class NCBILoader:
         self.is_running = False
 
         if not complete:
-            self._monitor.log(
+            await self._monitor.log(
                 "Interrupt signal received. Initiating graceful shutdown...", status="INTERRUPT"
             )
 
@@ -357,7 +367,7 @@ class NCBILoader:
 
         except Exception as e:
             # Catching unexpected runtime exceptions (e.g. disk full, OS errors)
-            self._monitor.log(f"Runtime Exception in run(): {e}", status="CRITICAL")
+            await self._monitor.log(f"Runtime Exception in run(): {e}", status="CRITICAL")
             raise
 
         finally:
@@ -366,7 +376,9 @@ class NCBILoader:
             await asyncio.gather(self.task_creator, *self.workers, return_exceptions=True)
 
             if self.is_running:
-                self._monitor.log("All downloads completed successfully!", status="SUCCESS", progress=True)
+                await self._monitor.log(
+                    "All downloads completed successfully!", status="SUCCESS", progress=True
+                )
 
             await self.network.close()
 
@@ -390,7 +402,7 @@ class NCBILoader:
         md5_hasher = hashlib.md5() if expected_checksum else None
 
         next_offset = 0
-        self._monitor.log(f"Streaming: {filename}", status="INFO")
+        await self._monitor.log(f"Streaming: {filename}", status="INFO")
         try:
             while next_offset < total_size:
                 # 1. Если в куче уже есть следующий кусок - отдаем его
@@ -435,15 +447,15 @@ class NCBILoader:
                     # Chunk is out of order, store it in the heap
                     heapq.heappush(self.heap, (chunk_start, chunk_data))
             else:
-                self._monitor.done(filename)
+                await self._monitor.done(filename)
 
                 if md5_hasher and expected_checksum:
                     try:
                         self.storage.verify_stream(md5_hasher, expected_checksum, next_offset, total_size)
                         if self._monitor:
-                            self._monitor.log("MD5 Verified", status="SUCCESS", progress=True)
+                            await self._monitor.log("MD5 Verified", status="SUCCESS", progress=True)
                     except Exception as e:
-                        self._monitor.log(str(e), status="ERROR")
+                        await self._monitor.log(str(e), status="ERROR")
                         raise
 
         finally:
@@ -476,14 +488,16 @@ class NCBILoader:
                 await self.condition.wait_for(lambda: not (self.files and self.is_running))
 
             if self.is_running:
-                self._monitor.log("All downloads completed successfully!", status="SUCCESS", progress=True)
+                await self._monitor.log(
+                    "All downloads completed successfully!", status="SUCCESS", progress=True
+                )
 
         except asyncio.CancelledError:
             pass
 
         except Exception as e:
             # Catching unexpected runtime exceptions (e.g. disk full, OS errors)
-            self._monitor.log(f"Runtime Exception in run(): {e}", status="CRITICAL")
+            await self._monitor.log(f"Runtime Exception in run(): {e}", status="CRITICAL")
             raise
 
         finally:
@@ -491,7 +505,7 @@ class NCBILoader:
 
             await asyncio.gather(self.task_creator, self.autosave_task, *self.workers, return_exceptions=True)
 
-            self.storage.save_all_states(self.files)
+            await self.storage.save_all_states(self.files)
             await self.network.close()
 
             for file_obj in self.files.values():
@@ -501,15 +515,15 @@ class NCBILoader:
                 loop.remove_signal_handler(sig)
 
     async def start(self) -> Self:
-        self._monitor.start()
+        await self._monitor.start()
         return self
 
     async def stop(self) -> None:
         await self._stop()
-        self._monitor.stop()
+        await self._monitor.stop()
 
     async def __aenter__(self) -> Self:
-        self._monitor.start()
+        await self._monitor.start()
         return self
 
     async def __aexit__(
@@ -519,4 +533,4 @@ class NCBILoader:
         _tb: TracebackType | None,
     ) -> None:
 
-        self._monitor.stop()
+        await self._monitor.stop()

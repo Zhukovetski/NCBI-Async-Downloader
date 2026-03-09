@@ -63,6 +63,27 @@ async def async_main(
             assert sys.__stdout__ is not None
             is_terminal = sys.__stdout__.isatty()
 
+            if is_terminal:
+                typer.secho(
+                    "⚠️ Warning: You are running in --stream mode but output is not redirected!\n"
+                    "The downloaded binary data will be discarded.",
+                    fg="yellow",
+                    err=True,
+                )
+
+                if not md5:
+                    typer.secho(
+                        "Please use a pipe (e.g., '| zcat') or redirect to a file (e.g., '> file.gz').\n"
+                        "Aborting to save bandwidth.",
+                        fg="red",
+                        err=True,
+                    )
+                    raise typer.Exit(code=1)
+
+                typer.secho(
+                    "Proceeding in 'Verification Only' mode since --md5 is provided.", fg="cyan", err=True
+                )
+
             async for _, file_gen in loader.stream_all(links, expected_checksums):
                 async for chunk in file_gen:
                     if not is_terminal:
@@ -108,7 +129,7 @@ def cli(
         int, typer.Option(help="Connection timeout in seconds for chunk downloads.")
     ] = 30,
     stream_buffer_size: Annotated[
-        int | None, typer.Option("--buffer", help="Maximum stream buffer size in bytes.")
+        int | None, typer.Option("--buffer", "-b", help="Maximum stream buffer size in bytes.")
     ] = None,
 ) -> None:
     """

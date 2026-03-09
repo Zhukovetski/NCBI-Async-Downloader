@@ -4,6 +4,7 @@
 import asyncio
 import hashlib
 import os
+import tempfile
 from _hashlib import HASH
 from pathlib import Path
 
@@ -28,7 +29,27 @@ class StorageManager:
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
-    def create_sparse_file(self, filename: str, size: int) -> None:
+    def get_unique_path(self, file_path: Path) -> Path:
+
+        if not file_path.is_file():
+            return file_path
+
+        stem = file_path.stem
+        suffix = file_path.suffix
+        directory = file_path.parent
+
+        counter = 1
+
+        while True:
+            new_name = f"{stem} ({counter}){suffix}"
+            new_path = directory / new_name
+
+            if not new_path.is_file():
+                return new_path
+
+            counter += 1
+
+    def create_sparse_file(self, filename: str, size: int) -> str | None:
         """
         Allocates disk space for a file using OS-level truncation.
         This prevents disk fragmentation and allows atomic random-access writes.
@@ -38,8 +59,16 @@ class StorageManager:
             size (int): Target size in bytes.
         """
         filepath = self.out_dir / filename
+
+        if filepath.is_file():
+            filepath = self.get_unique_path(filepath)
+
         with filepath.open("wb") as f:
             f.truncate(size)
+
+        if filepath.name != filename:
+            return filepath.name
+        return None
 
     def open_file(self, filename: str) -> int:
         """
@@ -74,10 +103,30 @@ class StorageManager:
 
     def save_state(self, file_obj: File) -> None:
         """Serializes and saves a single File object state to disk."""
-        path = self.get_state_path(file_obj.filename)
-        path.write_bytes(file_obj.to_json())
+        path = Path(self.get_state_path(file_obj.filename))
+        temp_dir = path.parent
+        temp_dir.mkdir(parents=True, exist_ok=True)
 
-    def save_all_states(self, files: dict[str, File]) -> None:
+        with tempfile.NamedTemporaryFile("wb", dir=temp_dir, delete=False) as tf:
+            tf.write(file_obj.to_json())
+            tf.flush()
+            os.fsync(tf.fileno())
+            temp_path = Path(tf.name)
+
+        try:
+            Path.replace(temp_path, path)
+            if os.name != "nt":
+                dir_fd = os.open(str(temp_dir), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+        except Exception:
+            if Path.exists(temp_path):
+                Path.unlink(temp_path)
+            raise
+
+    async def save_all_states(self, files: dict[str, File]) -> None:
         """
         Iterates over all active files and saves their states,
         skipping files that are completely downloaded.
@@ -85,10 +134,11 @@ class StorageManager:
         Args:
             files (dict[str, File]): Dictionary mapping filenames to File objects.
         """
+        loop = asyncio.get_event_loop()
         for _, file in list(files.items()):
             # Only save state if at least one chunk is not completely finished
             if not all(c.current_pos > c.end for c in (file.chunks or [])):
-                self.save_state(file)
+                await loop.run_in_executor(None, self.save_state, file)
 
     def load_state(self, filename: str) -> File | None:
         """
