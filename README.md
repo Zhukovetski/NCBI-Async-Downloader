@@ -30,7 +30,7 @@ A high-performance, fault-tolerant, and streaming-capable downloader for genomic
 * 📊 **Adaptive CLI:**
   * **Default:** Beautiful, dynamic UI powered by `Rich` (gradients, global ETA).
   * `--no-ui`: Plain text logs for CI/CD and Docker environments.
-  * `--silent`: Strict POSIX compliance (stderr for logs, stdout for binary data streams).
+  * `--quiet`: Strict POSIX compliance (stderr for logs, stdout for binary data streams).
 
 ---
 
@@ -66,7 +66,7 @@ ncbiloader "https://ftp.ncbi.nlm.nih.gov/.../genome.fna.gz" -t 20 --output ./dat
 Download a compressed genome, decompress it in memory, and count the sequences—**without saving the archive to your hard drive**:
 
 ```bash
-ncbiloader "https://ftp.ncbi.nlm.nih.gov/.../genome.fna.gz" -t 20 --stream --silent | zcat | grep -c "^>"
+ncbiloader "https://ftp.ncbi.nlm.nih.gov/.../genome.fna.gz" -t 20 --stream --quiet | zcat | grep -c "^>"
 ```
 
 ### 3. Use as a Python Library (For Data Science / ML)
@@ -79,7 +79,7 @@ from ncbiloader import NCBILoader
 async def main():
     urls =["https://url1.gz", "https://url2.gz"]
 
-    async with NCBILoader(threads=10, silent=True) as loader:
+    async with NCBILoader(threads=10, quiet=True) as loader:
         async for filename, stream in loader.stream_all(urls):
             print(f"Processing {filename}...")
             async for chunk_bytes in stream:

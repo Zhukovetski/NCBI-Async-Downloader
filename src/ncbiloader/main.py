@@ -1,11 +1,11 @@
 # Copyright (c) 2026 Valentin Zhukovetski
 # Licensed under the MIT License.
 
+import asyncio
 import sys
 from typing import Annotated
 
 import typer
-import uvloop
 
 from ncbiloader import NCBILoader
 
@@ -144,7 +144,14 @@ def cli(
 
     try:
         # uvloop replaces the standard asyncio event loop for maximum performance
-        uvloop.run(
+        try:
+            import uvloop
+
+            async_run = uvloop.run
+        except ImportError:
+            async_run = asyncio.run
+
+        async_run(
             async_main(
                 links=links,
                 stream=stream,

@@ -5,12 +5,15 @@ import asyncio
 import contextlib
 import email.utils
 import math
+import mimetypes
 import random
+import re
 import ssl
 import time
 import typing
 from collections.abc import AsyncIterator
 from typing import Any, TypedDict, Unpack, cast
+from urllib.parse import unquote
 
 import httpx
 from aiolimiter import AsyncLimiter
@@ -293,11 +296,8 @@ class NetworkClient:
 
                             delay = await self._evaluate_failure(url, attempt, response=response, exc=None)
 
-                except (httpx.RequestError, TimeoutError) as exc:
+                except Exception as exc:
                     delay = await self._evaluate_failure(url, attempt, response=None, exc=exc)
-
-                except Exception:
-                    raise
 
             if delay is None:
                 if response is not None:
@@ -325,6 +325,51 @@ class NetworkClient:
         except (ValueError, TypeError):
             pass
         return None
+
+    def extract_filename(self, url: str, headers: httpx.Headers) -> str:
+        """
+        Extracts and cleans a filename from Content-Disposition or URL.
+        Handles Cyrillic, special chars, and missing extensions.
+        """
+        filename = None
+        cd = headers.get("Content-Disposition", "")
+
+        # 1. Try RFC 5987 (Modern standard for UTF-8 names: filename*=UTF-8''...)
+        # Example: filename*=UTF-8''%D1%84%D0%B0%D0%B9%D0%BB.txt
+        match_utf8 = re.search(r"filename\*=\s*([^']+)''([^;]+)", cd)
+        if match_utf8:
+            filename = unquote(match_utf8.group(2))
+
+        # 2. Try Standard filename (filename="name.txt")
+        if not filename:
+            match_std = re.search(r'filename="?([^";]+)"?', cd)
+            if match_std:
+                filename = unquote(match_std.group(1))
+
+        # 3. Fallback to URL (strip params and anchors)
+        if not filename:
+            # Remove ?query=... and #anchor
+            clean_url = url.split("?")[0].split("#")[0].rstrip("/")
+            filename = unquote(clean_url.rsplit("/", 1)[-1])
+
+        # 4. Final Safety Net Name
+        if not filename or filename in [".", ""]:
+            filename = "downloaded_file"
+
+        # 5. Sanitize (Remove forbidden OS characters: / \ : * ? " < > |)
+        # Replaces them with an underscore
+        filename = re.sub(r'[\\/*?:"<>|]', "_", filename)
+
+        # 6. Logic for Missing Extension (via Content-Type)
+        if "." not in filename:
+            content_type = headers.get("Content-Type", "").split(";")[0]
+            ext = mimetypes.guess_extension(content_type)
+            if ext:
+                filename += ext
+            elif not filename.endswith(".bin"):
+                filename += ".bin"
+
+        return filename
 
     async def close(self) -> None:
         """Safely closes the underlying HTTP connection pool."""

@@ -23,7 +23,7 @@ async def test_add_task_producer(tmp_path: Path) -> None:
     respx.head(url).mock(return_value=httpx.Response(200, headers={"Content-Length": "500"}))
 
     # 2. Инициализируем лоадер (с временной папкой)
-    loader = NCBILoader(output_dir=str(tmp_path), silent=True)
+    loader = NCBILoader(output_dir=str(tmp_path), quiet=True)
 
     await loader._add_task_producer([url], expected_checksums=None)
 
@@ -51,7 +51,7 @@ async def test_loader_handles_404_gracefully(tmp_path: Path) -> None:
     # 1. Настраиваем respx: на любой HEAD запрос к этому URL возвращаем 404
     respx.head(url).mock(return_value=httpx.Response(404))
 
-    loader = NCBILoader(output_dir=str(tmp_path), silent=True)
+    loader = NCBILoader(output_dir=str(tmp_path), quiet=True)
 
     # 2. Запускаем. Если тут вылетит исключение - тест провален (красный)
     # Если пройдет тихо - тест успешен (зеленый)
@@ -81,7 +81,7 @@ async def test_graceful_shutdown_prevents_hang_run(tmp_path: Path) -> None:
 
     respx.get(url).mock(return_value=httpx.Response(206, content=slow_stream()))
 
-    loader = NCBILoader(output_dir=str(tmp_path), silent=True, threads=2)
+    loader = NCBILoader(output_dir=str(tmp_path), quiet=True, threads=2)
 
     # 2. Запускаем лоадер как ФОНОВУЮ ЗАДАЧУ
     run_task = asyncio.create_task(loader.run(url))
@@ -120,7 +120,7 @@ async def test_graceful_shutdown_prevents_hang_stream(tmp_path: Path) -> None:
 
     respx.get(url).mock(return_value=httpx.Response(206, content=slow_stream()))
 
-    loader = NCBILoader(output_dir=str(tmp_path), silent=True, threads=2)
+    loader = NCBILoader(output_dir=str(tmp_path), quiet=True, threads=2)
 
     # 2. СОЗДАЕМ ОБЕРТКУ-ПОТРЕБИТЕЛЬ
     # Эта корутина "распакует" генератор и заставит его работать

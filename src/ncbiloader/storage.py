@@ -140,7 +140,7 @@ class StorageManager:
             if not all(c.current_pos > c.end for c in (file.chunks or [])):
                 await loop.run_in_executor(None, self.save_state, file)
 
-    def load_state(self, filename: str) -> File | None:
+    def load_state(self, filename: str) -> tuple[File | None, int]:
         """
         Attempts to recover the download state from a JSON file.
 
@@ -154,14 +154,28 @@ class StorageManager:
             File | None: An instantiated File object if recovery is successful,
                          or None if the state is missing or corrupted.
         """
-        state_path = self.get_state_path(filename)
-        file_path = self.out_dir / filename
+        search_pattern = f"{filename}*.state.json"
+        states = list(self.state_dir.glob(search_pattern))
 
-        if state_path.is_file() and file_path.is_file():
+        if not states:
+            return None, 0
+
+        states.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        state_path = states[0]
+        try:
             with state_path.open("rb") as f:
                 content = f.read()
-                return File.from_json(content) if content else None
-        return None
+            file = File.from_json(content) if content else None
+        except Exception:
+            return None, len(states)
+
+        if not file:
+            return None, len(states)
+
+        if (self.out_dir / file.filename).is_file():
+            return file, len(states)
+
+        return None, len(states)
 
     def delete_state(self, filename: str) -> None:
         """

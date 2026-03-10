@@ -26,10 +26,6 @@ class NCBILoader:
     atomic disk writes, and automatic MD5 integrity verification.
     """
 
-    _queue: asyncio.Queue[tuple[int, Chunk]]
-    _stream_queue: asyncio.Queue[tuple[int, bytearray]]
-    workers: list[asyncio.Task[None]]
-
     def __init__(
         self,
         threads: int = 3,
@@ -40,6 +36,8 @@ class NCBILoader:
         chunk_timeout: int = 120,
         client_kwargs: dict[str, Any] | None = None,
     ) -> None:
+
+        self.is_running = True
 
         self._monitor = ProgressMonitor(no_ui=no_ui, quiet=quiet, log_file=f"{output_dir}/session.log")
         self.network = NetworkClient(threads=threads, monitor=self._monitor, client_kwargs=client_kwargs)
@@ -55,16 +53,17 @@ class NCBILoader:
         self.MIN_CHUNK = 1 * 1024 * 1024
         self._semaphore = asyncio.Semaphore(threads)
 
-        self._queue = asyncio.PriorityQueue()
+        self._queue: asyncio.Queue[tuple[int, Chunk]] = asyncio.PriorityQueue()
         maxsize = stream_buffer_size // self.MIN_CHUNK if stream_buffer_size else 0
         maxsize = maxsize if maxsize > self._max_conns else self._max_conns
-        self._stream_queue = asyncio.Queue(maxsize)
+        self._stream_queue: asyncio.Queue[tuple[int, bytearray]] = asyncio.Queue(maxsize)
+        self._file_discovery_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self.condition = asyncio.Condition()
+
         self.files: dict[str, File] = {}
         self.heap: list[tuple[int, bytearray]] = []
         self.heap_size = maxsize - self._max_conns
-        self.condition = asyncio.Condition()
-        self.is_running = True
-        self.workers = []
+        self.workers: list[asyncio.Task[None]] = []
         self.task_creator = None
         self.autosave_task = None
         self.current_file = ""
@@ -92,7 +91,6 @@ class NCBILoader:
             md5_val = checksums_map.get(url)
 
             try:
-                filename = url.rsplit("/", 1)[1]
                 file = None
                 total_size = 0
 
@@ -100,10 +98,14 @@ class NCBILoader:
                 response = await self.network.safe_request("Head", url=url)
 
                 if response is None:
-                    await self._monitor.log(f"Skipping {filename} due to unreachable remote.", status="ERROR")
+                    await self._monitor.log(f"Skipping {url} due to unreachable remote.", status="ERROR")
+                    if self._stream:
+                        await self._file_discovery_queue.put(None)
                     continue
 
                 total_size = int(response.headers.get("content-length", 0))
+
+                filename = self.network.extract_filename(url, response.headers)
 
                 if total_size <= 0:
                     await self._monitor.log(
@@ -119,7 +121,11 @@ class NCBILoader:
 
                 # 1. State Recovery
                 if not self._stream:
-                    file = self.storage.load_state(filename=filename)
+                    file, num = self.storage.load_state(filename=filename)
+                    if num > 1:
+                        await self._monitor.log(
+                            f"Multiple state files found for {filename}!", status="WARNING"
+                        )
 
                 # 2. Chunk geometry calculation
                 parts = self._max_conns
@@ -145,7 +151,7 @@ class NCBILoader:
                         chunk_size=chunk_size,
                         expected_md5=md5_val,
                     )
-
+                filename = file.filename
                 if not self._stream:
                     file.fd = self.storage.open_file(filename=filename)
 
@@ -158,6 +164,8 @@ class NCBILoader:
                     downloaded = sum(c.uploaded for c in chunks)
                     if downloaded - len(chunks) > 0:
                         self._monitor.update(filename, downloaded)
+                else:
+                    await self._file_discovery_queue.put(filename)
 
                 # 4. Dispatch tasks to queue
                 for c in chunks:
@@ -170,6 +178,8 @@ class NCBILoader:
                 break
             except Exception as e:
                 await self._monitor.log(f"Failed to process URL {url}: {e}", status="ERROR")
+                if self._stream:
+                    await self._file_discovery_queue.put(None)
                 # Do not raise here; allow the producer to move to the next URL
 
     async def _download_worker(self) -> None:
@@ -340,18 +350,13 @@ class NCBILoader:
         self.workers = [asyncio.create_task(self._download_worker()) for _ in range(self._max_conns)]
 
         try:
-            for url in links:
+            for _ in links:
                 if not self.is_running:
                     break
-                filename = url.rsplit("/", 1)[1]
 
-                # Wait for the producer to discover and register the file
-                while filename not in self.files:
-                    if self.task_creator.done():
-                        break
-                    await asyncio.sleep(0.1)
+                filename = await self._file_discovery_queue.get()
 
-                if filename not in self.files:
+                if filename is None:
                     continue
 
                 file_gen = self._stream_one(filename)
@@ -423,8 +428,8 @@ class NCBILoader:
 
                     yield chunk_bytes
 
-                    lenght = len(chunk_bytes)
-                    next_offset += lenght
+                    length = len(chunk_bytes)
+                    next_offset += length
                     continue
 
                 # 2. Wait for incoming chunks from workers
@@ -441,8 +446,8 @@ class NCBILoader:
 
                     yield chunk_bytes
 
-                    lenght = len(chunk_bytes)
-                    next_offset += lenght
+                    length = len(chunk_bytes)
+                    next_offset += length
                 else:
                     # Chunk is out of order, store it in the heap
                     heapq.heappush(self.heap, (chunk_start, chunk_data))
