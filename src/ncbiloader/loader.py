@@ -14,7 +14,7 @@ from typing import Any, Self
 from .models import Chunk, File
 from .monitor import ProgressMonitor
 from .network import NetworkClient
-from .providers import NCBIProvider
+from .providers import ProviderRouter
 from .storage import StorageManager
 
 
@@ -42,8 +42,7 @@ class NCBILoader:
         self._monitor = ProgressMonitor(no_ui=no_ui, quiet=quiet, log_file=f"{output_dir}/session.log")
         self.network = NetworkClient(threads=threads, monitor=self._monitor, client_kwargs=client_kwargs)
         self.storage = StorageManager(output_dir=output_dir)
-        self.ncbi = NCBIProvider(network=self.network)
-        self.providers = NCBIProvider(self.network)
+        self.providers = ProviderRouter(self.network)
 
         self._max_conns = threads
         self.chunk_timeout = chunk_timeout
@@ -116,7 +115,7 @@ class NCBILoader:
                 # Auto-fetch MD5 if missing
                 if not md5_val:
                     self._monitor.add_file(filename)
-                    md5_val = await self.providers.get_expected_hash(url, filename)
+                    md5_val = await self.providers.resolve_hash(url, filename)
                     await self._monitor.done(filename)
 
                 # 1. State Recovery
