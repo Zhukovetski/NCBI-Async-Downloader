@@ -13,7 +13,6 @@ async def chunk_producer(
     links: Iterable[str],
     expected_checksums: dict[str, str] | None = None,
 ) -> None:
-    """Main orchestration loop for task generation."""
     checksums_map = expected_checksums or {}
 
     for i, url in enumerate(links):
@@ -21,33 +20,25 @@ async def chunk_producer(
             break
 
         try:
-            # 1. Fetch Metadata (HEAD)
             meta = await _fetch_metadata(ctx, url)
             if not meta:
                 await ctx.file_discovery_queue.put(None)
                 continue
             filename, total_size = meta
-
-            # 2. Resolve MD5
             md5_val = await _resolve_md5(ctx, url, filename, checksums_map.get(url))
-
-            # 3. Prepare File Object (State recovery, Disk allocation)
             file_obj = await _prepare_file_object(
                 ctx, url, filename, total_size, md5_val
             )
-
-            # 4. Open File Descriptor (Disk mode only)
             if not ctx.stream:
                 file_obj.fd = open_file(ctx.fs, filename=file_obj.meta.filename)
 
-            # 5. Register in UI & Dispatch to Workers
             await _register_and_dispatch(ctx, file_obj, i)
 
         except asyncio.CancelledError:
             break
         except OSError as e:
             await log(ctx.ui, f"OS/Disk Error: {e}", status="CRITICAL")
-            ctx.is_running = False  # Fatal, halt everything
+            ctx.is_running = False
             break
         except Exception as e:
             await log(ctx.ui, f"Failed to process URL {url}: {e}", status="ERROR")
@@ -55,7 +46,6 @@ async def chunk_producer(
 
 
 async def _fetch_metadata(ctx: HydraContext, url: str) -> tuple[str, int] | None:
-    """Fetches headers, calculates total size, and extracts the optimal filename."""
     response = await safe_request(ctx.net, "HEAD", url=url)
     if response is None:
         await log(ctx.ui, f"Skipping {url} due to unreachable remote.", status="ERROR")
@@ -78,15 +68,13 @@ async def _fetch_metadata(ctx: HydraContext, url: str) -> tuple[str, int] | None
 async def _resolve_md5(
     ctx: HydraContext, url: str, filename: str, predefined_md5: str | None
 ) -> str | None:
-    """
-    Resolves the MD5 checksum either from provided args or by fetching from providers.
-    """
+
     if predefined_md5:
         return predefined_md5
 
-    add_file(ctx.ui, filename)  # Start indeterminate spinner
+    add_file(ctx.ui, filename)
     md5_val = await resolve_hash(ctx.net, url, filename)
-    await done(ctx.ui, filename)  # Stop spinner
+    await done(ctx.ui, filename)
 
     if md5_val is None:
         await log(ctx.ui, f"Missing MD5 hash for file: {filename}", status="WARNING")
@@ -97,14 +85,12 @@ async def _resolve_md5(
 async def _prepare_file_object(
     ctx: HydraContext, url: str, filename: str, total_size: int, md5_val: str | None
 ) -> File:
-    """Handles state recovery, disk space validation, and File object creation."""
-    # Calculate optimal chunk size
+
     parts = ctx.config.threads
     chunk_size = max(total_size // parts, ctx.MIN_CHUNK)
     if ctx.stream and chunk_size > ctx.STREAM_CHUNK_SIZE:
         chunk_size = ctx.STREAM_CHUNK_SIZE
 
-    # Stream Mode: No disk usage, create fresh File
     if ctx.stream:
         return File(
             meta=FileMeta(
@@ -116,7 +102,6 @@ async def _prepare_file_object(
             chunk_size=chunk_size,
         )
 
-    # Disk Mode: Try State Recovery
     file_obj, num_states = load_state(ctx.fs, filename=filename)
     if num_states > 1:
         await log(
@@ -126,7 +111,6 @@ async def _prepare_file_object(
     if file_obj:
         return file_obj
 
-    # Disk Mode: Fresh Download (Check space & allocate)
     new_filename = create_sparse_file(ctx.fs, filename=filename, size=total_size)
     if new_filename:
         await log(
@@ -146,7 +130,7 @@ async def _prepare_file_object(
 async def _register_and_dispatch(
     ctx: HydraContext, file_obj: File, priority_index: int
 ) -> None:
-    """Registers the file in the global context/UI and dispatches its chunks."""
+
     filename = file_obj.meta.filename
     ctx.files[filename] = file_obj
     chunks = file_obj.chunks or []
@@ -159,7 +143,6 @@ async def _register_and_dispatch(
     else:
         await ctx.file_discovery_queue.put(filename)
 
-    # 4. Dispatch tasks to queue
     for c in chunks:
         if not ctx.is_running:
             break

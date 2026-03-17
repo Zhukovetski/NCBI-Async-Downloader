@@ -10,13 +10,12 @@ import typer
 from hydrastream import __version__
 from hydrastream.facade import HydraClient
 
-# Initialize Typer app with disabled completion and auto-help on empty run
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
 
 def version_callback(value: bool) -> None:
     if value:
-        typer.echo(f"🐉 HydraStream v{__version__}")
+        typer.echo(f"HydraStream v{__version__}")
         raise typer.Exit()
 
 
@@ -65,17 +64,15 @@ async def async_main(
         output_dir=output_dir,
         stream_buffer_size=stream_buffer_size,
         chunk_timeout=chunk_timeout,
-        client_kwargs=None,  # Passed internally to NetworkClient
+        client_kwargs=None,
     ) as loader:
         if stream:
-            # sys.stdout.isatty() is True if running in an interactive terminal.
-            # It is False if output is piped (e.g., `| zcat` or `> file.txt`).
             assert sys.__stdout__ is not None
             is_terminal = sys.__stdout__.isatty()
 
             if is_terminal:
                 typer.secho(
-                    "⚠️ Warning: You are running in --stream mode but output "
+                    "Warning: You are running in --stream mode but output "
                     "is not redirected!\n"
                     "The downloaded binary data will be discarded.",
                     fg="yellow",
@@ -101,15 +98,11 @@ async def async_main(
             async for _, file_gen in loader.stream(links, expected_checksums):
                 async for chunk in file_gen:
                     if not is_terminal:
-                        # Safely write raw bytes to the pipe/file
                         sys.stdout.buffer.write(chunk)
                     else:
-                        # Terminal mode: consume bytes silently for MD5 validation
-                        # to avoid flooding the screen with binary garbage.
                         pass
 
                 if not is_terminal:
-                    # Ensure all data is pushed to the next process in the pipeline
                     sys.stdout.buffer.flush()
         else:
             await loader.run(links, expected_checksums)
@@ -169,18 +162,14 @@ def cli(
     ] = None,
 ) -> None:
     """
-    🐉 HydraStream: A multi-headed, fault-tolerant asynchronous downloader for Big Data.
-
-    Optimized for fetching massive datasets, ML models, and genomics data.
-    Features in-memory sequential streaming, concurrent chunking, and AIMD rate limiting
-    to survive network drops and server throttling.
+    HydraStream: Concurrent HTTP downloader with in-memory stream reordering
+    (httpx + uvloop).
     """
     if not links:
         typer.secho("No URLs provided for download!", fg="red", bold=True, err=True)
         raise typer.Exit(code=1)
 
     try:
-        # uvloop replaces the standard asyncio event loop for maximum performance
         if sys.platform != "win32":
             try:
                 import uvloop
@@ -203,12 +192,11 @@ def cli(
             )
         )
     except KeyboardInterrupt:
-        typer.secho("\n⛔ Interrupted by user (CLI).", fg="yellow", err=True)
-        # 130 is the standard Unix exit code for script termination via Ctrl+C
+        typer.secho("\nInterrupted by user (CLI).", fg="yellow", err=True)
         raise typer.Exit(code=130) from None
+
     except Exception as e:
-        typer.secho(f"\n💥 Critical error: {e}", fg="red", bold=True, err=True)
-        # 1 indicates a general error (useful for automated pipelines)
+        typer.secho(f"\nCritical error: {e}", fg="red", bold=True, err=True)
         raise  # typer.Exit(code=1) from None
 
 

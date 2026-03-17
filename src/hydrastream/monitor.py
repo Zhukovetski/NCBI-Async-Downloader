@@ -33,30 +33,10 @@ STATUS = Literal["SUCCESS", "INFO", "WARNING", "ERROR", "CRITICAL", "INTERRUPT"]
 
 
 def truncate_filename(name: str, w: int = 30) -> str:
-    """
-    Truncates a long filename from the middle to preserve the extension and prefix.
-
-    Args:
-        name (str): Original filename.
-        w (int): Maximum allowed width.
-
-    Returns:
-        str: Truncated string with ellipses if it exceeds the specified width.
-    """
     return f"{name[: w // 2 - 1]}...{name[-w // 2 + 2 :]}" if len(name) > w else name
 
 
 def get_gradient_color(percentage: float) -> str:
-    """
-    Calculates a hex color transitioning smoothly from Red (0%) to Yellow (50%)
-    to Green (100%).
-
-    Args:
-        percentage (float): The completion percentage.
-
-    Returns:
-        str: Hex color code (e.g., '#ff0000').
-    """
     p = max(0, min(100, percentage or 0))
     if p < 50:
         r, g, b = 255, int((p / 50) * 255), 0
@@ -66,27 +46,17 @@ def get_gradient_color(percentage: float) -> str:
 
 
 class GradientBar(BarColumn):
-    """Custom Rich BarColumn that applies a dynamic color gradient based on progress."""
-
     def render(self, task: Task) -> ProgressBar:
-        # Color for indeterminate processes (pulsing effect)
         if task.total is None:
             self.complete_style = "cyan"
         elif task.finished:
-            # High-visibility style for completed tasks
             self.complete_style = "bold bright_green blink"
         else:
-            # Dynamic gradient calculation
             self.complete_style = get_gradient_color(task.percentage)
         return super().render(task)
 
 
 class GradientPercent(ProgressColumn):
-    """
-    Custom Rich ProgressColumn that displays
-    the percentage with a matching gradient color.
-    """
-
     def render(self, task: Task) -> Text:
         if task.total is None:
             return Text(" CALC ", style="yellow")
@@ -96,7 +66,6 @@ class GradientPercent(ProgressColumn):
 
 
 def write_log(ctx: StorageState, msg: str) -> None:
-    """Appends a raw text message to the log file, stripping ANSI UI tags."""
     if not ctx.log_file:
         return
 
@@ -105,18 +74,16 @@ def write_log(ctx: StorageState, msg: str) -> None:
             clean_msg = Text.from_markup(str(msg)).plain
             f.write(f"{clean_msg}\n")
     except OSError:
-        # Graceful degradation: do not crash the app if logging fails
         pass
 
 
 async def date_print(ctx: UIState) -> None:
     current_date = datetime.now().strftime("%Y-%m-%d")
-    date_header = f"[bold cyan]📅 Date: {current_date}[/]"
+    date_header = f"[bold cyan] Date: {current_date}[/]"
 
     if not (ctx.no_ui or ctx.quiet):
         ctx.console.print(Rule(date_header))
     await log(ctx, f"--- {current_date} ---")
-    _date_printed = True
 
 
 async def log(
@@ -127,15 +94,7 @@ async def log(
     throttle_key: str | None = None,
     throttle_sec: float = 10.0,
 ) -> None:
-    """
-    Universal logging method. Writes to the log file and conditionally
-    renders to the terminal UI based on the operational mode.
 
-    Args:
-        message (str): The log message content.
-        status (STATUS): Severity level dictating UI formatting.
-        progress (bool): If True, forces display in the UI even if it's an INFO message.
-    """
     if throttle_key:
         now = time.monotonic()
         last_time = ctx.log_throttle.get(throttle_key, 0.0)
@@ -157,7 +116,7 @@ async def log(
         match status.upper():
             case "CRITICAL" | "INTERRUPT":
                 renderable = Panel(
-                    f"[bold red]⚠️ {message}[/]\n[dim white]"
+                    f"[bold red]{message}[/]\n[dim white]"
                     f"Partial data may have been saved.",
                     title="[bold red]Interrupted",
                     border_style="red",
@@ -171,11 +130,11 @@ async def log(
                     padding=(0, 1),
                 )
             case "WARNING":
-                renderable = f"⚠️ [yellow]{formatted_msg}[/]"
+                renderable = f"[yellow]{formatted_msg}[/]"
             case "INFO":
                 renderable = f"[white]{formatted_msg}[/]"
             case "SUCCESS":
-                renderable = f"✅ [green]{formatted_msg}[/]"
+                renderable = f"[green]{formatted_msg}[/]"
             case _:
                 renderable = message
 
@@ -186,7 +145,6 @@ async def log(
 
 
 def add_file(ctx: UIState, filename: str, total_size: int | None = None) -> None:
-    """Registers a new file in the UI, keeping it hidden until data arrives."""
     if total_size is not None:
         ctx.total_bytes += total_size
         ctx.total_files += 1
@@ -206,14 +164,12 @@ def add_file(ctx: UIState, filename: str, total_size: int | None = None) -> None
 
 
 def update(ctx: UIState, filename: str, advance_bytes: int) -> None:
-    """Instantly writes bytes to the memory buffer."""
 
     ctx.buffer[filename] += advance_bytes
     ctx.download_bytes += advance_bytes
 
 
 async def refresh_loop(ctx: UIState) -> None:
-    """Resets the accumulated buffer in the UI (Rich)"""
 
     if ctx.progress:
         while ctx.is_running:
@@ -236,14 +192,10 @@ async def refresh_loop(ctx: UIState) -> None:
 
 
 def update_panel_title(ctx: UIState) -> None:
-    """Re-evaluates the active task count and updates the dynamic title string."""
     if not ctx.live:
         ctx.dynamic_title = ""
 
-    # Count tasks
     active = len(ctx.active_files)
-
-    # Create a dynamic string
     ctx.dynamic_title = (
         f"[bold white][green]{ctx.files_completed}[/]/"
         + f"[blue]{ctx.total_files}[/] Files | [yellow]{active} Active[/]"
@@ -251,7 +203,6 @@ def update_panel_title(ctx: UIState) -> None:
 
 
 async def done(ctx: UIState, filename: str) -> None:
-    """Marks a file task as complete, hides its progress bar, and updates metrics."""
     if ctx.progress and filename in ctx.tasks:
         task_id = ctx.tasks[filename]
         ctx.progress.update(
@@ -272,15 +223,10 @@ async def done(ctx: UIState, filename: str) -> None:
 
 
 def make_panel(ctx: UIState) -> Panel | str:
-    """
-    Declarative rendering method called rapidly by Rich Live.
-    Evaluates global state to generate either the active downloads
-    UI or the final report.
-    """
+
     if not ctx.progress:
         return ""
 
-    # 2. Logic: If nothing to show, return empty string (removes the box)
     if not ctx.tasks and len(ctx.progress.tasks) == 0:
         return ""
 
@@ -306,7 +252,7 @@ def make_panel(ctx: UIState) -> Panel | str:
         r_hours, r_mins = divmod(r_mins, 60)
     remain_time_str = f"{r_hours:02d}:{r_mins:02d}:{r_secs:02d}"
 
-    if ctx.total_bytes < 1_073_741_824:  # GB
+    if ctx.total_bytes < 1_073_741_824:
         size_str = (
             f"{ctx.download_bytes / (1024**2):.2f}/{ctx.total_bytes / (1024**2):.2f} MB"
         )
@@ -315,13 +261,12 @@ def make_panel(ctx: UIState) -> Panel | str:
             f"{ctx.download_bytes / (1024**3):.2f}/{ctx.total_bytes / (1024**3):.2f} GB"
         )
 
-    # Trigger final report rendering if all tasks are complete
     if not ctx.tasks and ctx.total_files > 0 and ctx.total_files == ctx.files_completed:
         grid = Table.grid(expand=True)
         grid.add_column()
         grid.add_column(justify="center")
 
-        content = Group("[green]✅ All downloads completed successfully!\n", grid)
+        content = Group("[green]All downloads completed successfully!\n", grid)
         grid.add_row(
             "[white]Total files:", f"[green3]{ctx.files_completed}/{ctx.total_files}[/]"
         )
@@ -351,7 +296,6 @@ def make_panel(ctx: UIState) -> Panel | str:
 
 
 async def handle_exit(ctx: UIState, cancelled: bool = False) -> None:
-    """Closes the UI and logs the session end, generating a summary report."""
     if ctx.live:
         ctx.live.stop()
         if ctx.refresh:
@@ -360,7 +304,7 @@ async def handle_exit(ctx: UIState, cancelled: bool = False) -> None:
     elapsed = time.monotonic() - ctx.start_time
     avg_speed = (ctx.download_bytes / elapsed) / (1024**2) if elapsed > 0 else 0
 
-    if ctx.total_bytes < 1_073_741_824:  # GB
+    if ctx.total_bytes < 1_073_741_824:
         size_str = (
             f"{ctx.download_bytes / (1024**2):.2f}/{ctx.total_bytes / (1024**2):.2f} MB"
         )
@@ -388,7 +332,6 @@ async def handle_exit(ctx: UIState, cancelled: bool = False) -> None:
 
 
 async def ui_start(ctx: UIState) -> None:
-    """Initializes the display engine and internal timers."""
     if not (ctx.no_ui or ctx.quiet):
         ctx.progress = Progress(
             SpinnerColumn("aesthetic"),
@@ -427,25 +370,5 @@ async def ui_start(ctx: UIState) -> None:
 
 
 async def ui_stop(ctx: UIState) -> None:
-    """Manually stops the monitor."""
     await handle_exit(ctx)
     write_log(ctx.storage, "--- Session Finished ---")
-
-
-# async def __aenter__(self) -> None:
-#     if self.progress:
-#         self.live.start()
-#         self.refresh = asyncio.create_task(refresh_loop(self))
-#     self.start_time = time.monotonic()
-#     write_log(self.storage, "--- Session Started ---")
-#     await date_print(self)
-#     return
-
-# async def __aexit__(
-#     self,
-#     _exc_type: type[BaseException] | None = None,
-#     _exc: BaseException | None = None,
-# ) -> None:
-#     is_cancelled = _exc_type in (KeyboardInterrupt, asyncio.CancelledError)
-#     await handle_exit(self, cancelled=is_cancelled)
-#     write_log(self.storage, "--- Session Finished ---")

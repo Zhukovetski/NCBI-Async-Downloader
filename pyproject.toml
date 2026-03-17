@@ -69,53 +69,34 @@ where =["src"]
 hydrastream = { workspace = true }
 
 [tool.ruff]
-# Specify the source directory for correct import sorting
 src = ["src"]
 line-length = 88
 target-version = "py311"
 
 [tool.ruff.lint]
 select =[
-    "E", "W",  # pycodestyle
-    "F",       # pyflakes
-    "I",       # isort
-    "UP",      # pyupgrade
-    "B",       # bugbear
-    "SIM",     # simplify
-    "C901",    # complex-structure
-    "ANN",     # annotations
-    "PTH",     # use-pathlib
-    "RET",     # return-statements
-    "RUF",     # ruff-specific
-    "N",       # pep8-naming
+    "E", "W",
+    "F",
+    "I",
+    "UP",
+    "B",
+    "SIM",
+    "C901",
+    "ANN",
+    "PTH",
+    "RET",
+    "RUF",
+    "N",
 ]
 fixable =["ALL"]
 
-ignore =[
-    "RUF001", # Allow Cyrillic letters in strings
-    "RUF002", # Allow Cyrillic letters in docstrings
-    "RUF003", # Allow Cyrillic letters in comments
-    "C901",   # Ignore complexity warnings for now
-    "W293",   # Blank line contains whitespace
-]
 
 [tool.ruff.format]
-# Use double quotes (Black standard)
 quote-style = "double"
-
-# Use spaces instead of tabs
 indent-style = "space"
-
-# Automatically detect line endings (LF or CRLF)
 line-ending = "auto"
-
-# Automatically format code blocks inside docstrings
 docstring-code-format = true
-
-# Do not skip formatting of magic trailing commas
 skip-magic-trailing-comma = false
-
-# Enable experimental formatting improvements
 preview = true
 
 [tool.ruff.lint.pydocstyle]

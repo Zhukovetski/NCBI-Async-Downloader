@@ -21,33 +21,22 @@ async def test_add_task_producer(tmp_path: Path) -> None:
 
     url = "https://fake-ncbi.com/genome.gz"
 
-    # 1. Имитируем ответ сервера
     respx.head(url).mock(
         return_value=httpx.Response(200, headers={"Content-Length": "500"})
     )
 
-    # 2. Создаем наш глобальный контекст (Завод)
-    # tmp_path автоматически создаст временную папку для теста
     engine = HydraStream(output_dir=str(tmp_path), quiet=True)
 
-    # 3. Вызываем функцию Продюсера.
-    # ВАЖНО: передаем engine.producer (это ProducerState) первым аргументом!
     await chunk_producer(engine.producer, [url], expected_checksums=None)
-
-    # 4. ПРОВЕРКИ (Asserts)
-    # Так как Продюсер пишет данные в общие словари (которые лежат в engine),
-    # мы проверяем именно их!
     assert "genome.gz" in engine.files
 
     file_obj = engine.files["genome.gz"]
     assert file_obj.meta.content_length == 500
 
-    # Проверяем физический диск (storage_state)
     file_path = engine.storage.out_dir / "genome.gz"
     assert file_path.exists()
     assert file_path.stat().st_size == 500
 
-    # Проверяем, что чанки упали в очередь
     assert not engine.chunk_queue.empty()
 
 

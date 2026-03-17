@@ -17,10 +17,7 @@ from hydrastream.storage import (
 
 
 async def run_dispatch_loop(ctx: HydraContext) -> None:
-    """
-    Background worker that consumes chunks from the queue, downloads data,
-    and triggers integrity checks upon file completion.
-    """
+
     while ctx.is_running:
         chunk = None
         try:
@@ -30,7 +27,6 @@ async def run_dispatch_loop(ctx: HydraContext) -> None:
                 ctx.chunk_queue.task_done()
                 continue
 
-            # Stream backpressure: wait for the current file to be completely consumed
             if ctx.stream and ctx.current_file != chunk.filename:
                 async with ctx.condition:
                     await ctx.condition.wait_for(
@@ -41,7 +37,6 @@ async def run_dispatch_loop(ctx: HydraContext) -> None:
 
             await _process_chunk(ctx, chunk)
 
-            # Integrity check trigger for disk mode
             if not ctx.stream:
                 filename = chunk.filename
                 file_obj = ctx.files.get(filename)
@@ -77,9 +72,9 @@ async def run_dispatch_loop(ctx: HydraContext) -> None:
                     if not ctx.files:
                         async with ctx.condition:
                             ctx.condition.notify_all()
-            # ------------------------------------
+
         except asyncio.CancelledError:
-            break  # Worker shutdown requested
+            break
 
         except httpx.HTTPStatusError as e:
             if chunk:
@@ -93,10 +88,9 @@ async def run_dispatch_loop(ctx: HydraContext) -> None:
                     ctx.files[chunk.filename].is_failed = True
                 else:
                     if ctx.is_running:
-                        # Exponential or fixed backoff for chunk retry
                         await asyncio.sleep(random.uniform(0.5, 2.0))
-                        # Re-queue with high priority (-1)
                         await ctx.chunk_queue.put((-1, chunk))
+
         except (httpx.RequestError, TimeoutError):
             if ctx.is_running and chunk:
                 await asyncio.sleep(random.uniform(1.0, 3.0))

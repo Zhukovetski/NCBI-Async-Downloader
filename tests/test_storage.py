@@ -50,7 +50,7 @@ async def test_write_chunk_data_out_of_order(tmp_path: Path) -> None:
 
 
 def test_save_and_load_state(tmp_path: Path) -> None:
-    """We check that StorageManager is correctly searching for and loading .state.json"""
+
     storage = StorageManager(output_dir=str(tmp_path))
 
     file_obj = File(
@@ -71,7 +71,6 @@ def test_save_and_load_state(tmp_path: Path) -> None:
 
 
 def test_verify_file_hash(tmp_path: Path) -> None:
-    """We check that the cryptographic verification fails on broken files"""
     storage = StorageManager(output_dir=str(tmp_path))
 
     real_content = b"The quick brown fox jumps over the lazy dog"

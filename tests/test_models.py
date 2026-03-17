@@ -15,7 +15,6 @@ def test_chunk_properties() -> None:
 
 
 def test_file_chunk_generation() -> None:
-    """We check that the file cuts itself into pieces correctly"""
     file_obj = File(
         filename="genome.fna",
         url="http://example.com/genome.fna",
@@ -37,7 +36,6 @@ def test_file_chunk_generation() -> None:
 
 
 def test_chunk_is_finished() -> None:
-    """Checking the logic of the piece completion"""
     chunk = Chunk(filename="test", start=0, end=100, current_pos=0)
     assert chunk.is_finished is False
 

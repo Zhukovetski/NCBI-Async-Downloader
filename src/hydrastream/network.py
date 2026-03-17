@@ -47,14 +47,12 @@ class RequestOptions(TypedDict, total=False):
 
 
 async def report_429(ctx: AMIDState, retry_after: float | None = None) -> None:
-    """Throttles or Breaks the circuit."""
     async with ctx.lock:
         now = time.time()
         ctx.last_429_time = now
 
         break_duration = retry_after if retry_after is not None else ctx.initial_rps
 
-        # If we are already at MIN speed and still getting 429s -> BREAK CIRCUIT
         if ctx.current_rps <= ctx.min_rps or retry_after is not None:
             ctx.circuit_broken_until = now + break_duration
             await log(
@@ -79,20 +77,14 @@ async def report_429(ctx: AMIDState, retry_after: float | None = None) -> None:
 
 
 async def try_scale_up(ctx: AMIDState) -> bool:
-    """
-    Attempts to increase RPS.
-    Returns True if increased, False if in cooldown or at max.
-    """
+
     async with ctx.lock:
-        # 1. Check if we are still in the "penalty box"
         if time.time() - ctx.last_429_time < ctx.cooldown_seconds:
             return False
 
-        # 2. Check if we are already at the ceiling
         if ctx.current_rps >= ctx.max_rps:
             return False
 
-        # 3. Scale up safely
         ctx.current_rps += 1
         ctx.limiter = AsyncLimiter(ctx.current_rps, 1)
         return True
@@ -113,7 +105,6 @@ async def acquire(
     async with ctx.lock:
         current_limiter = ctx.limiter
 
-    # Элегантный и безопасный способ!
     async with current_limiter:
         yield
 
@@ -175,20 +166,7 @@ async def _evaluate_failure(
 async def safe_request(
     ctx: NetworkState, method: str, url: str, **kwargs: Unpack[RequestOptions]
 ) -> httpx.Response | None:
-    """
-    Executes an HTTP request with built-in retry logic.
 
-    Handles rate limits (429) using the 'Retry-After' header and applies
-    exponential backoff with full jitter for server-side errors (5xx).
-
-    Args:
-        method: HTTP method (e.g., "GET", "HEAD").
-        url: Target URL.
-        **kwargs: Additional options passed to httpx.request.
-
-    Returns:
-        httpx.Response on success, or None if all retry attempts fail.
-    """
     for attempt in range(1, ctx.max_retries + 1):
         async with acquire(ctx.rate_limiter):
             try:
@@ -217,21 +195,6 @@ async def safe_request(
 async def stream_chunk(
     ctx: NetworkState, url: str, headers: dict[str, str], chunk_timeout: int
 ) -> AsyncIterator[httpx.Response]:
-    """
-    Context manager for streaming large file chunks asynchronously.
-
-    Args:
-        url: Target URL to download.
-        headers: HTTP headers (usually containing 'Range' bytes).
-        timeout: Absolute timeout for the entire chunk download process.
-
-    Yields:
-        httpx.Response object configured for async byte streaming.
-
-    Raises:
-        httpx.HTTPStatusError: If server responds with 400+ status code.
-        TimeoutError: If the chunk download exceeds the specified absolute timeout.
-    """
 
     for attempt in range(1, ctx.max_retries + 1):
         response = None
@@ -272,14 +235,12 @@ async def stream_chunk(
                 raise httpx.RequestError(
                     f"Stream failed on {url} before response was received"
                 )
-
         await asyncio.sleep(delay)
 
     raise httpx.RequestError(f"Failed to establish stream for {url} after 3 attempts.")
 
 
 def _get_retry_after(response: httpx.Response) -> float | None:
-    """Parses the 'Retry-After' header into seconds."""
     header = response.headers.get("Retry-After")
     if not header:
         return None
@@ -295,40 +256,28 @@ def _get_retry_after(response: httpx.Response) -> float | None:
 
 
 def extract_filename(url: str, headers: httpx.Headers) -> str:
-    """
-    Extracts and cleans a filename from Content-Disposition or URL.
-    Handles Cyrillic, special chars, and missing extensions.
-    """
+
     filename = None
     cd = headers.get("Content-Disposition", "")
 
-    # 1. Try RFC 5987 (Modern standard for UTF-8 names: filename*=UTF-8''...)
-    # Example: filename*=UTF-8''%D1%84%D0%B0%D0%B9%D0%BB.txt
     match_utf8 = re.search(r"filename\*=\s*([^']+)''([^;]+)", cd)
     if match_utf8:
         filename = unquote(match_utf8.group(2))
 
-    # 2. Try Standard filename (filename="name.txt")
     if not filename:
         match_std = re.search(r'filename="?([^";]+)"?', cd)
         if match_std:
             filename = unquote(match_std.group(1))
 
-    # 3. Fallback to URL (strip params and anchors)
     if not filename:
-        # Remove ?query=... and #anchor
         clean_url = url.split("?")[0].split("#")[0].rstrip("/")
         filename = unquote(clean_url.rsplit("/", 1)[-1])
 
-    # 4. Final Safety Net Name
     if not filename or filename in [".", ""]:
         filename = "downloaded_file"
 
-    # 5. Sanitize (Remove forbidden OS characters: / \ : * ? " < > |)
-    # Replaces them with an underscore
     filename = re.sub(r'[\\/*?:"<>|]', "_", filename)
 
-    # 6. Logic for Missing Extension (via Content-Type)
     if "." not in filename:
         content_type = headers.get("Content-Type", "").split(";")[0]
         ext = mimetypes.guess_extension(content_type)
@@ -341,5 +290,4 @@ def extract_filename(url: str, headers: httpx.Headers) -> str:
 
 
 async def close(ctx: NetworkState) -> None:
-    """Safely closes the underlying HTTP connection pool."""
     await ctx.client.aclose()

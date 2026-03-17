@@ -17,10 +17,7 @@ from hydrastream.storage import autosave, save_all_states, verify_stream
 
 
 async def _stop(ctx: HydraContext, complete: bool = False) -> None:
-    """
-    Executes a graceful shutdown sequence.
-    Cancels active tasks and flushes deadlocked queues using poison pills.
-    """
+
     if not ctx.is_running:
         return
 
@@ -42,7 +39,6 @@ async def _stop(ctx: HydraContext, complete: bool = False) -> None:
             if worker and not worker.done():
                 worker.cancel()
 
-    # Inject Poison Pill to terstream consumer
     if ctx.stream:
         with contextlib.suppress(asyncio.QueueFull):
             ctx.stream_queue.put_nowait((-1, bytearray()))
@@ -56,17 +52,12 @@ async def stream_all(
     links: str | Iterable[str],
     expected_checksums: dict[str, str] | None = None,
 ) -> AsyncGenerator[tuple[str, AsyncGenerator[bytes]]]:
-    """
-    Orchestrates sequential streaming of multiple files.
-    Manages the lifecycle of producers and workers, yielding a separate
-    byte generator for each file.
-    """
+
     await ui_start(ctx.ui)
     ctx.stream = True
     if isinstance(links, str):
         links = [links]
     loop = asyncio.get_running_loop()
-    # Graceful shutdown handler
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(_stop(ctx)))
 
@@ -99,7 +90,6 @@ async def stream_all(
         pass
 
     except Exception as e:
-        # Catching unexpected runtime exceptions (e.g. disk full, OS errors)
         await log(ctx.ui, f"Runtime Exception in run(): {e}", status="CRITICAL")
         raise
 
@@ -129,13 +119,9 @@ async def stream_all(
 
 
 async def _stream_one(ctx: HydraContext, filename: str) -> AsyncGenerator[bytes]:
-    """
-    Internal generator that reorders downloaded chunks from the queue
-    into a sequentiastream.
-    """
+
     ctx.current_file = filename
 
-    # WAKE UP WORKERS: Tell them it's time to process this file!
     async with ctx.condition:
         ctx.condition.notify_all()
 
@@ -148,16 +134,13 @@ async def _stream_one(ctx: HydraContext, filename: str) -> AsyncGenerator[bytes]
     await log(ctx.ui, f"Streaming: {filename}", status="INFO")
     try:
         while next_offset < total_size:
-            # 1. Если в куче уже есть следующий кусок - отдаем его
             if not ctx.is_running:
                 break
 
-            # 1. Check if the next sequential chunk is already in the heap
             if ctx.heap and ctx.heap[0][0] == next_offset:
                 _, chunk_data = heapq.heappop(ctx.heap)
                 chunk_bytes = bytes(chunk_data)
 
-                # We freed up heap space, notify the producer
                 async with ctx.condition:
                     ctx.condition.notify()
 
@@ -170,12 +153,10 @@ async def _stream_one(ctx: HydraContext, filename: str) -> AsyncGenerator[bytes]
                 next_offset += length
                 continue
 
-            # 2. Wait for incoming chunks from workers
             chunk_start, chunk_data = await ctx.stream_queue.get()
             if chunk_start == -1:
                 break
 
-            # 3. Process incoming chunk
             if chunk_start == next_offset:
                 chunk_bytes = bytes(chunk_data)
 
@@ -187,7 +168,6 @@ async def _stream_one(ctx: HydraContext, filename: str) -> AsyncGenerator[bytes]
                 length = len(chunk_bytes)
                 next_offset += length
             else:
-                # Chunk is out of order, store it in the heap
                 heapq.heappush(ctx.heap, (chunk_start, chunk_data))
         else:
             await done(ctx.ui, filename)
@@ -203,7 +183,6 @@ async def _stream_one(ctx: HydraContext, filename: str) -> AsyncGenerator[bytes]
                     raise
 
     finally:
-        # Cleanup and notify stream_all that we are done
         ctx.heap.clear()
         del ctx.files[filename]
 
@@ -213,9 +192,7 @@ async def run_downloads(
     links: str | Iterable[str],
     expected_checksums: dict[str, str] | None = None,
 ) -> None:
-    """
-    Executes the download pipeline, writing data directly to disk.
-    """
+
     await ui_start(ctx.ui)
     ctx.stream = False
     if isinstance(links, str):
@@ -253,7 +230,6 @@ async def run_downloads(
         pass
 
     except Exception as e:
-        # Catching unexpected runtime exceptions (e.g. disk full, OS errors)
         await log(ctx.ui, f"Runtime Exception in run(): {e}", status="CRITICAL")
         raise
 
