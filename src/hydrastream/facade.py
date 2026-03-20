@@ -1,4 +1,5 @@
-# main.py или facade.py
+# Copyright (c) 2026 Valentin Zhukovetski
+# Licensed under the MIT License.
 
 
 import asyncio

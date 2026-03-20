@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Valentin Zhukovetski
+# Licensed under the MIT License.
+
 MIN_CHUNK: int = 1048576  # 1MB
 STREAM_CHUNK_SIZE: int = 5242880  # 5MB
 

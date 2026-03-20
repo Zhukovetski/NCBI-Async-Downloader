@@ -197,7 +197,7 @@ def cli(
 
     except Exception as e:
         typer.secho(f"\nCritical error: {e}", fg="red", bold=True, err=True)
-        raise  # typer.Exit(code=1) from None
+        raise typer.Exit(code=1) from None
 
 
 if __name__ == "__main__":

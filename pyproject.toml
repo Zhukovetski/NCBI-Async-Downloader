@@ -4,7 +4,7 @@
 # ==============================================================================
 [project]
 name = "hydrastream"
-version = "1.0.0"
+version = "1.1.0"
 license = {text = "MIT"}
 description = "Concurrent HTTP downloader with in-memory stream reordering (httpx + uvloop)."
 authors =[

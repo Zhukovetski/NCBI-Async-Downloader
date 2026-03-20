@@ -5,6 +5,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Coverage: 90%](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)](https://github.com/Zhukovetski/HydraStream)
 [![Tests](https://github.com/Zhukovetski/HydraStream/actions/workflows/tests.yml/badge.svg)](https://github.com/Zhukovetski/HydraStream/actions/workflows/tests.yml)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/HydraStream/HydraStream)
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Zhukovetski/HydraStream/main/assets/Demo.gif" alt="HydraStream Demo" width="800">
+</p>assets/
 
 HydraStream is a concurrent HTTP downloader written in Python. It supports multipart downloading and in-memory chunk reordering, allowing you to stream remote files directly to `stdout` without writing to disk.
 
@@ -79,11 +84,11 @@ if __name__ == "__main__":
 | `--no-ui` | `-nu` | `False` | Disables progress bars, leaves plain text logs. |
 | `--quiet` | `-q` | `False` | Silence console output. Logs are still written to file. |
 | `--md5` | | `None` | Expected MD5 hash (single URL only). |
-| `--buffer` | `-b` | `threads * 5MB` | Maximum stream buffer size in bytes. |
+| `--buffer` | `-b` | `threads * 10MB` | Maximum stream buffer size in bytes. |
 
 ## Roadmap
 
-* **v1.1: Autonomous Worker Scaling:** Transition from a static thread pool to adaptive concurrency based on network conditions and downstream backpressure.
+* **v1.2: Autonomous Worker Scaling:** Transition from a static thread pool to adaptive concurrency based on network conditions and downstream backpressure.
 * **v2.0: Rust Core:** Port the core engine to Rust (`tokio`/`reqwest`) with a `PyO3` wrapper to bypass the Python GIL and improve multi-core execution.
 
 ## License
