@@ -22,9 +22,8 @@ async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
 
     filename = chunk.filename
     file_obj = ctx.files[filename]
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, verify_file_hash, ctx.fs, file_obj)
-
+    if not await verify_file_hash(ctx.fs, file_obj):
+        return
     file_obj.close_fd()
     verify_size(ctx.fs, file_obj)
     delete_state(ctx.fs, filename)
@@ -58,7 +57,7 @@ async def run_dispatch_loop(ctx: HydraContext) -> None:
             chunk = await get_chunk(ctx)
             if chunk is None:
                 continue
-            await _process_chunk(ctx, chunk)
+            await process_chunk(ctx, chunk)
             await file_done(ctx, chunk)
 
         except asyncio.CancelledError:
@@ -148,7 +147,7 @@ async def stream_process_chunk(
             raise
 
 
-async def _process_chunk(ctx: HydraContext, chunk: Chunk) -> None:
+async def process_chunk(ctx: HydraContext, chunk: Chunk) -> None:
     if chunk.current_pos > chunk.end:
         return
     headers = {"Range": f"bytes={chunk.current_pos}-{chunk.end}"}

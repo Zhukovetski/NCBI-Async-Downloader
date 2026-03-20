@@ -16,7 +16,7 @@ from hydrastream.producer import chunk_producer
 from hydrastream.storage import autosave, save_all_states, verify_stream
 
 
-async def _stop(ctx: HydraContext, complete: bool = False) -> None:
+async def stop(ctx: HydraContext, complete: bool = False) -> None:
 
     if not ctx.is_running:
         return
@@ -47,75 +47,45 @@ async def _stop(ctx: HydraContext, complete: bool = False) -> None:
         ctx.condition.notify_all()
 
 
-async def stream_all(
+async def _teardown_engine(
     ctx: HydraContext,
-    links: str | Iterable[str],
-    expected_checksums: dict[str, str] | None = None,
-) -> AsyncGenerator[tuple[str, AsyncGenerator[bytes]]]:
+    loop: asyncio.AbstractEventLoop,
+    workers: list[asyncio.Task[None]],
+    task_creator: asyncio.Task[None] | None,
+    autosave_task: asyncio.Task[None] | None = None,
+) -> None:
+    """Универсальная глушилка завода. Защищает от копипасты."""
+    await stop(ctx, complete=True)
 
-    await ui_start(ctx.ui)
-    ctx.stream = True
-    if isinstance(links, str):
-        links = [links]
-    loop = asyncio.get_running_loop()
+    # Гасим задачи
+    tasks_to_cancel = [t for t in [task_creator, autosave_task] if t] + workers
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
+    # Проверка на успех
+    if (
+        ctx.is_running
+        and ctx.ui.total_files > 0
+        and ctx.ui.total_files == ctx.ui.files_completed
+    ):
+        await log(
+            ctx.ui,
+            "All downloads completed successfully!",
+            status="SUCCESS",
+            progress=True,
+        )
+
+    # Закрываем ресурсы
+    if not ctx.stream:
+        save_all_states(ctx.fs, ctx.files)
+        for file_obj in ctx.files.values():
+            file_obj.close_fd()
+
+    await close(ctx.net)
+    await ui_stop(ctx.ui)
+
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(_stop(ctx)))
-
-    ctx.task_creator = asyncio.create_task(
-        chunk_producer(ctx, links, expected_checksums)
-    )
-    ctx.workers = [
-        asyncio.create_task(run_dispatch_loop(ctx)) for _ in range(ctx.config.threads)
-    ]
-
-    try:
-        for _ in links:
-            if not ctx.is_running:
-                break
-
-            filename = await ctx.file_discovery_queue.get()
-
-            if filename is None:
-                continue
-
-            file_gen = _stream_one(ctx, filename)
-
-            yield filename, file_gen
-            async with ctx.condition:
-                await ctx.condition.wait_for(
-                    lambda f=filename: f not in ctx.files or not ctx.is_running
-                )
-
-    except asyncio.CancelledError:
-        pass
-
-    except Exception as e:
-        await log(ctx.ui, f"Runtime Exception in run(): {e}", status="CRITICAL")
-        raise
-
-    finally:
-        await _stop(ctx, complete=True)
-
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.gather(ctx.task_creator, *ctx.workers, return_exceptions=True)
-
-        if (
-            ctx.is_running
-            and ctx.ui.total_files > 0
-            and ctx.ui.total_files == ctx.ui.files_completed
-        ):
-            await log(
-                ctx.ui,
-                "All downloads completed successfully!",
-                status="SUCCESS",
-                progress=True,
-            )
-
-        await close(ctx.net)
-        await ui_stop(ctx.ui)
-
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.remove_signal_handler(sig)
+        loop.remove_signal_handler(sig)
 
 
 async def _stream_one(ctx: HydraContext, filename: str) -> AsyncGenerator[bytes]:
@@ -187,6 +157,56 @@ async def _stream_one(ctx: HydraContext, filename: str) -> AsyncGenerator[bytes]
         del ctx.files[filename]
 
 
+async def stream_all(
+    ctx: HydraContext,
+    links: str | Iterable[str],
+    expected_checksums: dict[str, str] | None = None,
+) -> AsyncGenerator[tuple[str, AsyncGenerator[bytes]]]:
+
+    await ui_start(ctx.ui)
+    ctx.stream = True
+    if isinstance(links, str):
+        links = [links]
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(stop(ctx)))
+
+    ctx.task_creator = asyncio.create_task(
+        chunk_producer(ctx, links, expected_checksums)
+    )
+    ctx.workers = [
+        asyncio.create_task(run_dispatch_loop(ctx)) for _ in range(ctx.config.threads)
+    ]
+
+    try:
+        for _ in links:
+            if not ctx.is_running:
+                break
+
+            filename = await ctx.file_discovery_queue.get()
+
+            if filename is None:
+                continue
+
+            file_gen = _stream_one(ctx, filename)
+
+            yield filename, file_gen
+            async with ctx.condition:
+                await ctx.condition.wait_for(
+                    lambda f=filename: f not in ctx.files or not ctx.is_running
+                )
+
+    except asyncio.CancelledError:
+        pass
+
+    except Exception as e:
+        await log(ctx.ui, f"Runtime Exception in run(): {e}", status="CRITICAL")
+        raise
+
+    finally:
+        await _teardown_engine(ctx, loop, ctx.workers, ctx.task_creator)
+
+
 async def run_downloads(
     ctx: HydraContext,
     links: str | Iterable[str],
@@ -200,7 +220,7 @@ async def run_downloads(
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(_stop(ctx)))
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(stop(ctx)))
     ctx.task_creator = asyncio.create_task(
         chunk_producer(ctx, links, expected_checksums)
     )
@@ -234,33 +254,4 @@ async def run_downloads(
         raise
 
     finally:
-        await _stop(ctx, complete=True)
-
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.gather(
-                ctx.task_creator,
-                ctx.autosave_task,
-                *ctx.workers,
-                return_exceptions=True,
-            )
-
-        save_all_states(ctx.fs, ctx.files)
-
-        for file_obj in ctx.files.values():
-            file_obj.close_fd()
-
-        await close(ctx.net)
-        await ui_stop(ctx.ui)
-
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.remove_signal_handler(sig)
-
-
-async def engine_start(ctx: HydraContext) -> HydraContext:
-    await ui_start(ctx.ui)
-    return ctx
-
-
-async def engine_stop(ctx: HydraContext) -> None:
-    await _stop(ctx)
-    await ui_stop(ctx.ui)
+        await _teardown_engine(ctx, loop, ctx.workers, ctx.task_creator)

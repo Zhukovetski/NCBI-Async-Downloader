@@ -98,7 +98,7 @@ class FileMeta:
     filename: str
     url: str
     content_length: int
-    expected_md5: str | None
+    expected_md5: str | None = None
 
 
 @entity
@@ -177,8 +177,7 @@ class UIState:
     log_file: Path
 
     is_running: bool = True
-    console = Console(stderr=True)
-    progress = None
+    console: Console = Console(stderr=True)
 
     start_time: float = 0.0
     total_bytes: int = 0
@@ -196,10 +195,9 @@ class UIState:
     buffer: defaultdict[str, int] = field(default_factory=lambda: defaultdict(int))
     active_files: set[str] = field(default_factory=set[str])
 
-    refresh: asyncio.Task[None] = field(init=False)
-
-    progress: Progress | None = field(init=False)
-    live: Live | None = field(init=False)
+    refresh: asyncio.Task[None] | None = None
+    progress: Progress | None = None
+    live: Live | None = None
 
     def __post_init__(self) -> None:
         self.renewal_rate = 1 / self.refresh_per_second
@@ -212,7 +210,6 @@ class StorageState:
     is_running: bool = True
     files: dict[str, File] = field(default_factory=dict[str, File])
     state_dir: Path = field(init=False)
-    log_file: Path = field(init=False)
 
     def __post_init__(self) -> None:
         self.out_dir = Path(self.out_dir).expanduser().resolve()
@@ -286,7 +283,7 @@ class HydraConfig:
     no_ui: bool = False
     quiet: bool = False
     out_dir: str = "download"
-    chunk_timeout: int = 120
+    chunk_timeout: float = 120
     stream_buffer_size: int | None = None
     client_kwargs: dict[str, Any] | None = None
 
@@ -317,8 +314,8 @@ class HydraContext:
     file_discovery_queue: asyncio.Queue[str | None] = field(init=False)
     condition: asyncio.Condition = field(init=False)
 
-    task_creator: asyncio.Task[None] = field(init=False)
-    workers: list[asyncio.Task[None]] = field(init=False)
+    task_creator: asyncio.Task[None] | None = None
+    workers: list[asyncio.Task[None]] | None = None
     autosave_task: asyncio.Task[None] | None = None
 
     def __post_init__(self) -> None:
@@ -336,15 +333,14 @@ class HydraContext:
             maxsize if maxsize > self.config.threads * 2 else self.config.threads * 2
         )
         self.heap_size = maxsize
-
-        self.fs = StorageState(
-            ui=self.ui, out_dir=Path(self.config.out_dir), files=self.files
-        )
         self.ui = UIState(
             is_running=self.is_running,
             no_ui=self.config.no_ui,
             quiet=self.config.quiet,
             log_file=Path(self.config.out_dir) / "download.log",
+        )
+        self.fs = StorageState(
+            ui=self.ui, out_dir=Path(self.config.out_dir), files=self.files
         )
         self.net = NetworkState(
             threads=self.config.threads,

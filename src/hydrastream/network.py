@@ -28,6 +28,11 @@ from httpx._types import (
     TimeoutTypes,
 )
 
+from hydrastream.constants import (
+    HTTP_BAD_REQUEST_THRESHOLD,
+    HTTP_TOO_MANY_REQUESTS,
+    SCALE_UP_PROBABILITY,
+)
 from hydrastream.models import AMIDState, NetworkState
 from hydrastream.monitor import log
 
@@ -128,7 +133,7 @@ async def _evaluate_failure(
             return None
 
         server_delay = _get_retry_after(response)
-        if response.status_code == 429:
+        if response.status_code == HTTP_TOO_MANY_REQUESTS:
             await report_429(ctx.rate_limiter, server_delay)
 
         delay = (
@@ -171,8 +176,8 @@ async def safe_request(
         async with acquire(ctx.rate_limiter):
             try:
                 resp = await ctx.client.request(method, url, **kwargs)
-                if resp.status_code < 400:
-                    if random.random() < 0.1:
+                if resp.status_code < HTTP_BAD_REQUEST_THRESHOLD:
+                    if random.random() < SCALE_UP_PROBABILITY:
                         await try_scale_up(ctx.rate_limiter)
                     return resp
 
@@ -193,7 +198,7 @@ async def safe_request(
 
 @contextlib.asynccontextmanager
 async def stream_chunk(
-    ctx: NetworkState, url: str, headers: dict[str, str], chunk_timeout: int
+    ctx: NetworkState, url: str, headers: dict[str, str], chunk_timeout: float
 ) -> AsyncIterator[httpx.Response]:
 
     for attempt in range(1, ctx.max_retries + 1):
@@ -205,8 +210,8 @@ async def stream_chunk(
                     async with ctx.client.stream(
                         "GET", url, headers=headers
                     ) as response:
-                        if response.status_code < 400:
-                            if random.random() < 0.1:
+                        if response.status_code < HTTP_BAD_REQUEST_THRESHOLD:
+                            if random.random() < SCALE_UP_PROBABILITY:
                                 await try_scale_up(ctx.rate_limiter)
                             yielded = True
                             yield response
@@ -272,7 +277,9 @@ def extract_filename(url: str, headers: httpx.Headers) -> str:
     if not filename:
         clean_url = url.rstrip("/")
         clean_url = clean_url.split("?")[0].split("#")[0]
-        filename = unquote(clean_url.rsplit("/", 1)[-1])
+        clean_url, name = clean_url.rsplit("/", 1)
+        if "/" in clean_url and not clean_url.endswith(":/"):
+            filename = unquote(name)
 
     if not filename or filename in [".", ""]:
         filename = "downloaded_file"

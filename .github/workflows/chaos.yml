@@ -1,81 +1,114 @@
+# ==============================================================================
+# ИСПЫТАНИЯ ХАОСОМ (Тестирование отказоустойчивости сети и ОС)
+# ==============================================================================
 name: HydraStream Chaos Engineering
 
 on:
+  # Запускать автоматически каждое воскресенье в 03:00 ночи
   schedule:
     - cron: '0 3 * * 0'
+  # Позволяет запускать этот тест руками из интерфейса GitHub (вкладка Actions)
   workflow_dispatch:
 
 jobs:
   chaos-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 10 # Защита от зависания. Если тест висит дольше 10 минут - убить и признать провалом.
 
     env:
+      # Тестовый файл: геном с FTP-сервера NCBI (отличный выбор, они часто лагают)
       TEST_URL: "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_cds_from_genomic.fna.gz"
 
     steps:
-      - name: 📥 Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4 # Скачиваем код из нашего репозитория
 
-      - name: 🚀 Install uv
-        uses: astral-sh/setup-uv@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5 # Ставим быстрый пакетный менеджер uv
         with:
           enable-cache: true
 
-      - name: 🐍 Set up Python 3.11
+      - name: Set up Python 3.11
         run: uv python install 3.11
 
-      - name: 📦 Install HydraStream globally
-        run: uv tool install .
+      - name: Install HydraStream globally
+        run: uv tool install . # Устанавливаем нашу утилиту, чтобы команда `hs` стала доступна в консоли
 
-      - name: 🌪️ Test 1 - Flaky Network (10% Packet Loss, 200ms Delay)
+      # ------------------------------------------------------------------------
+      # ТЕСТ 1: ИМИТАЦИЯ ПЛОХОГО WI-FI (Потеря пакетов и высокий пинг)
+      # ------------------------------------------------------------------------
+      - name: Test 1 - Flaky Network (10% Packet Loss, 200ms Delay)
         run: |
           echo "Injecting 10% packet loss and 200ms latency..."
+          # Магия Linux (Traffic Control). Портим сеть на интерфейсе eth0:
+          # теряем каждый 10-й пакет, добавляем задержку в 200 миллисекунд.
           sudo tc qdisc add dev eth0 root netem loss 10% delay 200ms
 
+          # Запускаем загрузку (в режиме стрима, вывод кидаем в черную дыру /dev/null, чтобы не засорять логи CI)
           hs "$TEST_URL" --stream -q > /dev/null
 
           echo "Restoring network..."
+          # Возвращаем нормальную сеть
           sudo tc qdisc del dev eth0 root
-          echo "✅ Flaky Network Test Passed!"
+          echo "Flaky Network Test Passed!"
 
-      - name: ✂️ Test 2 - Total Internet Outage & Recovery
+      # ------------------------------------------------------------------------
+      # ТЕСТ 2: ВНЕЗАПНЫЙ ОБРЫВ ИНТЕРНЕТА (Проверка Circuit Breaker и AIMD)
+      # ------------------------------------------------------------------------
+      - name: Test 2 - Total Internet Outage & Recovery
         run: |
-
+          # Режем скорость до 10 Мегабит и добавляем задержку 400ms, чтобы файл не скачался слишком быстро
           sudo tc qdisc add dev eth0 root tbf rate 10mbit burst 32k latency 400ms
 
+          # Запускаем загрузку В ФОНЕ (символ & в конце)
           hs "$TEST_URL" --stream -q > /dev/null &
-          PID=$!
+          PID=$! # Запоминаем ID процесса нашего HydraStream
 
+          # Даем ему 3 секунды, чтобы он успел разогнаться и открыть коннекты
           sleep 3
 
-          echo "🚫 CUTTING INTERNET OFF..."
+          echo "CUTTING INTERNET OFF..."
+          # Роняем файрвол: жестко блокируем весь исходящий HTTPS (443 порт) трафик. Интернет пропал.
           sudo iptables -A OUTPUT -p tcp --dport 443 -j DROP
 
+          # Держим без интернета 15 секунд. Тут HydraStream должен уйти в exponential backoff (ожидание)
           sleep 15
 
-          echo "🌐 RESTORING INTERNET..."
+          echo "RESTORING INTERNET..."
+          # Удаляем правило файрвола. Интернет появился.
           sudo iptables -D OUTPUT -p tcp --dport 443 -j DROP
 
+          # Ждем, пока фоновый процесс HydraStream не завершится (он должен сам восстановиться и докачать файл)
           wait $PID
 
+          # Чистим за собой лимиты скорости
           sudo tc qdisc del dev eth0 root
-          echo "✅ Outage Recovery Test Passed!"
+          echo " Outage Recovery Test Passed!"
 
-      - name: 💤 Test 3 - Process Suspend (SIGSTOP / SIGCONT)
+      # ------------------------------------------------------------------------
+      # ТЕСТ 3: ЗАСЫПАНИЕ НОУТБУКА (Тест на заморозку процесса ОС)
+      # ------------------------------------------------------------------------
+      - name: Test 3 - Process Suspend (SIGSTOP / SIGCONT)
         run: |
+          # Запускаем в фоне
           hs "$TEST_URL" --stream -q > /dev/null &
           PID=$!
 
           sleep 2
 
-          echo "🧊 FREEZING PROCESS (SIGSTOP)..."
+          echo "FREEZING PROCESS (SIGSTOP)..."
+          # Сигнал STOP - это то, что делает ОС, когда ты закрываешь крышку ноутбука.
+          # Процесс мгновенно замораживается на уровне ядра (в т.ч. все его асинхронные задачи).
           kill -STOP $PID
 
+          # Спим 10 секунд (пока он заморожен, сервер NCBI может разорвать TCP-соединения по таймауту)
           sleep 10
 
-          echo "🔥 WAKING UP PROCESS (SIGCONT)..."
+          echo "WAKING UP PROCESS (SIGCONT)..."
+          # Сигнал CONT - ноутбук проснулся. HydraStream должен понять, что коннекты протухли,
+          # переоткрыть их и продолжить качать с нужного байта, не сломав буфер.
           kill -CONT $PID
 
+          # Ждем успешного завершения
           wait $PID
-          echo "✅ Sleep/Resume Test Passed!"
+          echo "Sleep/Resume Test Passed!"

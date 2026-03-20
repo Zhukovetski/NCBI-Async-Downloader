@@ -27,7 +27,7 @@ async def async_main(
     quiet: bool,
     output_dir: str,
     md5: str | None,
-    chunk_timeout: int,
+    chunk_timeout: float,
     stream_buffer_size: int | None,
 ) -> None:
     """
@@ -61,7 +61,7 @@ async def async_main(
         threads=threads,
         no_ui=no_ui,
         quiet=quiet,
-        output_dir=output_dir,
+        out_dir=output_dir,
         stream_buffer_size=stream_buffer_size,
         chunk_timeout=chunk_timeout,
         client_kwargs=None,
@@ -150,7 +150,7 @@ def cli(
         typer.Option("--quiet", "-q", help="Dead silence. No console output at all."),
     ] = False,
     chunk_timeout: Annotated[
-        int, typer.Option(help="Connection timeout in seconds for chunk downloads.")
+        float, typer.Option(help="Connection timeout in seconds for chunk downloads.")
     ] = 30,
     stream_buffer_size: Annotated[
         int | None,

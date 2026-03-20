@@ -1,28 +1,29 @@
-from hydrastream.models import Chunk, File
+from hydrastream.models import Chunk, File, FileMeta
 
 
 def test_chunk_properties() -> None:
     chunk = Chunk(filename="test.gz", start=100, end=199, current_pos=150)
 
-    assert chunk.size == 100  # 199 - 100 + 1
-    assert chunk.uploaded == 51  # 150 - 100 + 1
-    assert chunk.remaining == 50  # 199 - 150 + 1
+    assert chunk.size == 100
+    assert chunk.uploaded == 51
+    assert chunk.remaining == 50
     assert chunk.is_finished is False
-    assert chunk.get_header() == {"Range": "bytes=150-199"}
 
     chunk.current_pos = 200
     assert chunk.is_finished is True
 
 
 def test_file_chunk_generation() -> None:
-    file_obj = File(
+    meta = FileMeta(
         filename="genome.fna",
         url="http://example.com/genome.fna",
         content_length=105,
+    )
+    file_obj = File(
+        meta=meta,
         chunk_size=50,
     )
 
-    # 105 bytes of 50 bytes = 3 chunks (50, 50, 5)
     assert len(file_obj.chunks) == 3
 
     assert file_obj.chunks[0].start == 0
@@ -47,16 +48,19 @@ def test_to_json_in_json() -> None:
     total_size = 105
     chunk_size = 50
 
-    file_obj = File(
+    meta = FileMeta(
         filename="test.txt",
         url="http://fake.url",
         content_length=total_size,
+    )
+    file_obj = File(
+        meta=meta,
         chunk_size=chunk_size,
     )
 
     test_obj = File.from_json(file_obj.to_json())
 
     assert test_obj.chunk_size == file_obj.chunk_size
-    assert test_obj.content_length == file_obj.content_length
-    assert test_obj.filename == file_obj.filename
-    assert test_obj.url == file_obj.url
+    assert test_obj.meta.content_length == file_obj.meta.content_length
+    assert test_obj.meta.filename == file_obj.meta.filename
+    assert test_obj.meta.url == file_obj.meta.url

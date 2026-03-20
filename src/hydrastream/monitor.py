@@ -27,6 +27,7 @@ from rich.rule import Rule
 from rich.table import Column, Table
 from rich.text import Text
 
+from hydrastream.constants import COLOR_PIVOT_PERCENT, MINUTES_PER_HOUR
 from hydrastream.models import UIState
 
 STATUS = Literal["SUCCESS", "INFO", "WARNING", "ERROR", "CRITICAL", "INTERRUPT"]
@@ -38,7 +39,7 @@ def truncate_filename(name: str, w: int = 30) -> str:
 
 def get_gradient_color(percentage: float) -> str:
     p = max(0, min(100, percentage or 0))
-    if p < 50:
+    if p < COLOR_PIVOT_PERCENT:
         r, g, b = 255, int((p / 50) * 255), 0
     else:
         r, g, b = int(255 - ((p - 50) / 50) * 255), 255, 0
@@ -240,7 +241,7 @@ def make_panel(ctx: UIState) -> Panel | str:
 
     mins, secs = divmod(int(elapsed), 60)
     hours = 0
-    if mins >= 60:
+    if mins >= MINUTES_PER_HOUR:
         hours, mins = divmod(mins, 60)
     time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
 
@@ -252,7 +253,7 @@ def make_panel(ctx: UIState) -> Panel | str:
 
     r_mins, r_secs = divmod(int(remain_time), 60)
     r_hours = 0
-    if r_mins >= 60:
+    if r_mins >= MINUTES_PER_HOUR:
         r_hours, r_mins = divmod(r_mins, 60)
     remain_time_str = f"{r_hours:02d}:{r_mins:02d}:{r_secs:02d}"
 

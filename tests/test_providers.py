@@ -1,29 +1,30 @@
 # tests/test_providers.py
 import base64
-from collections.abc import Callable, Generator
-from typing import Any
+from collections.abc import Iterator
+from pathlib import Path
 
 import httpx
 import pytest
 import respx
 
-from hydrastream.models import HydraContext
-from hydrastream.monitor import ProgressMonitor
-from hydrastream.network import NetworkClient
-from hydrastream.providers import CloudProvider, NCBIProvider, ProviderRouter
+from hydrastream.models import NetworkState, UIState
+from hydrastream.providers import (
+    get_expected_hash,
+    ncbi_get_expected_hash,
+    resolve_hash,
+)
 
 
 @pytest.fixture
-def network_client() -> Generator[Any, Any, Any]:
-    monitor = ProgressMonitor(HydraContext(), quiet=True)
-    client = NetworkClient(threads=1, monitor=monitor)
+def network_client(tmp_path: Path) -> Iterator[NetworkState]:
+    monitor = UIState(log_file=tmp_path / "log", quiet=True)
+    client = NetworkState(threads=1, monitor=monitor)
     yield client
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_ncbi_provider(network_client: Generator[Any, Any, Any]) -> None:
-    provider = NCBIProvider(network_client)
+async def test_ncbi_provider(network_client: NetworkState) -> None:
     url = "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF_001/file.gz"
     checksum_url = "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF_001/md5checksums.txt"
 
@@ -34,14 +35,15 @@ async def test_ncbi_provider(network_client: Generator[Any, Any, Any]) -> None:
         return_value=httpx.Response(200, text=fake_md5_content)
     )
 
-    hash_val = await provider.get_expected_hash(url, "file.gz")
+    hash_val = await ncbi_get_expected_hash(network_client, url, "file.gz")
     assert hash_val == "d41d8cd98f00b204e9800998ecf8427e"
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_cloud_provider_s3_etag(network_client: Callable) -> None:
-    provider = CloudProvider(network_client)
+async def test_cloud_provider_s3_etag(
+    network_client: NetworkState,
+) -> None:
     url = "https://s3.amazonaws.com/bucket/data.bin"
 
     respx.head(url).mock(
@@ -50,14 +52,16 @@ async def test_cloud_provider_s3_etag(network_client: Callable) -> None:
         )
     )
 
-    hash_val = await provider.get_expected_hash(url)
+    hash_val = await get_expected_hash(network_client, url)
     assert hash_val == "abcdef1234567890abcdef1234567890"
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_cloud_provider_goog_hash(network_client: Callable) -> None:
-    provider = CloudProvider(network_client)
+async def test_cloud_provider_goog_hash(
+    network_client: NetworkState,
+) -> None:
+
     url = "https://storage.googleapis.com/bucket/data.bin"
 
     raw_md5 = b"1234567890abcdef"
@@ -69,12 +73,13 @@ async def test_cloud_provider_goog_hash(network_client: Callable) -> None:
         )
     )
 
-    hash_val = await provider.get_expected_hash(url)
+    hash_val = await get_expected_hash(network_client, url)
     assert hash_val == raw_md5.hex()
 
 
 @pytest.mark.asyncio
-async def test_provider_router_delegation(network_client: Callable) -> None:
-    router = ProviderRouter(network_client)
+async def test_provider_router_delegation(
+    network_client: NetworkState,
+) -> None:
 
-    assert await router.resolve_hash("https://google.com/file", "file") is None
+    assert await resolve_hash(network_client, "https://google.com/file", "file") is None

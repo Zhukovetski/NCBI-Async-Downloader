@@ -1,36 +1,55 @@
+# ==============================================================================
+# КОНФИГУРАЦИЯ PRE-COMMIT (Фейсконтроль перед git commit)
+# ==============================================================================
 repos:
+  # ----------------------------------------------------------------------------
+  # 1. БАЗОВЫЕ ПРОВЕРКИ (Официальный репозиторий pre-commit)
+  # ----------------------------------------------------------------------------
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
-      - id: trailing-whitespace
-      - id: end-of-file-fixer
-      - id: check-yaml
-      - id: check-toml
-      - id: check-added-large-files
-        args: ['--maxkb=1000']
-      - id: debug-statements
-      - id: check-merge-conflict
+      - id: trailing-whitespace         # Удаляет лишние пробелы в концах строк (чтобы гит не засорялся)
+      - id: end-of-file-fixer           # Добавляет пустую строку в конец каждого файла (стандарт POSIX)
+      - id: check-yaml                  # Проверяет, что YAML-файлы не сломаны синтаксически
+      - id: check-toml                  # Проверяет, что TOML-файлы (напр. pyproject.toml) не сломаны
+      - id: check-added-large-files     # Запрещает коммитить огромные файлы
+        args: ['--maxkb=1000']          # Лимит 1 МБ. Защита от случайного git add dataset.gz
+      - id: debug-statements            # Ищет забытые breakpoint(), import pdb (чтобы дебаг не ушел в прод)
+      - id: check-merge-conflict        # Ищет куски <<<<<<< HEAD, если ты криво разрешил конфликты слияния
 
-
+  # ----------------------------------------------------------------------------
+  # 2. RUFF (Линтер и Форматтер)
+  # ----------------------------------------------------------------------------
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.9.9
     hooks:
       - id: ruff
-        args: [ --fix, --exit-non-zero-on-fix ]
-      - id: ruff-format
+        # --fix: заставляет ruff попытаться самому исправить найденные ошибки.
+        # --exit-non-zero-on-fix: если ruff что-то исправил, коммит всё равно ОТМЕНЯЕТСЯ.
+        # Это нужно, чтобы ты посмотрел, что именно он там авто-исправил, и заново сделал git add.
+        args:[ --fix, --exit-non-zero-on-fix ]
+      - id: ruff-format                 # Автоматически причесывает код (как Black)
 
+  # ----------------------------------------------------------------------------
+  # 3. BANDIT (Поиск дыр в безопасности)
+  # ----------------------------------------------------------------------------
   - repo: https://github.com/PyCQA/bandit
     rev: 1.8.3
     hooks:
       - id: bandit
-        args: ["-c", "pyproject.toml"]
-        additional_dependencies: ["bandit[toml]"]
+        args: ["-c", "pyproject.toml"]  # Читает настройки из нашего pyproject.toml
+        additional_dependencies: ["bandit[toml]"] # Плагин, чтобы bandit умел читать .toml
 
+  # ----------------------------------------------------------------------------
+  # 4. PYRIGHT (Строгая проверка типов)
+  # ----------------------------------------------------------------------------
   - repo: local
     hooks:
       - id: pyright
         name: pyright
         entry: pyright
-        language: system
+        language: system                # ВАЖНО: Вызываем pyright из нашей локальной ОС/окружения!
         types: [python]
-        pass_filenames: false
+        pass_filenames: false           # Говорим проверять весь проект целиком, а не только измененные файлы.
+        # Почему local? Потому что стандартный изолированный pre-commit не видит наш виртуальный
+        # .venv с библиотеками, и Pyright начал бы ругаться, что "импорты не найдены".

@@ -4,6 +4,7 @@
 import asyncio
 import hashlib
 import os
+import re
 import shutil
 import tempfile
 from _hashlib import HASH
@@ -108,7 +109,7 @@ def save_all_states(ctx: StorageState, files: dict[str, File]) -> None:
             save_state(ctx, file)
 
 
-async def autosave(ctx: HydraContext, interval: int) -> None:
+async def autosave(ctx: HydraContext, interval: float) -> None:
     loop = asyncio.get_running_loop()
     while ctx.is_running:
         try:
@@ -122,28 +123,46 @@ async def autosave(ctx: HydraContext, interval: int) -> None:
 
 def load_state(ctx: StorageState, filename: str) -> tuple[File | None, int]:
 
-    search_pattern = f"{filename}*.state.json"
-    states = list(ctx.state_dir.glob(search_pattern))
+    p = Path(filename)
+    main_name = p.stem  # "GCF_..._genomic.fna"
+    last_ext = p.suffix  # ".gz"
 
-    if not states:
+    # Экранируем обе части
+    safe_main = re.escape(main_name)
+    safe_ext = re.escape(last_ext)
+
+    # Паттерн: Название + (число) + расширение + .state.json
+    pattern = re.compile(rf"^{safe_main}(?: \((\d+)\))?{safe_ext}\.state\.json$")
+
+    found_states: list[tuple[Path, int]] = []
+    for f in ctx.state_dir.iterdir():
+        match = pattern.match(f.name)
+        if match:
+            # Если скобок нет (оригинал), считаем номер 0
+            # Если есть, берем число из первой группы
+            counter = int(match.group(1)) if match.group(1) else 0
+            found_states.append((f, counter))
+
+    if not found_states:
         return None, 0
 
-    states.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    state_path = states[0]
+    # Сортируем по числу (второй элемент кортежа) и берем самый большой
+    state_path, _ = max(found_states, key=lambda x: x[1])
+
     try:
         with state_path.open("rb") as f:
             content = f.read()
         file = File.from_json(content) if content else None
     except Exception:
-        return None, len(states)
+        return None, len(found_states)
 
     if not file:
-        return None, len(states)
+        return None, len(found_states)
 
     if (ctx.out_dir / file.meta.filename).is_file():
-        return file, len(states)
+        return file, len(found_states)
 
-    return None, len(states)
+    return None, len(found_states)
 
 
 def delete_state(ctx: StorageState, filename: str) -> None:
@@ -167,11 +186,15 @@ def verify_size(ctx: StorageState, file: File) -> None:
             raise ValueError(err_msg)
 
 
-async def verify_file_hash(ctx: StorageState, file: File) -> None:
-    if not file.is_complete or not file.meta.expected_md5 or file.verified:
-        return
+async def verify_file_hash(ctx: StorageState, file: File) -> bool | None:
+    if file.verified or not file.is_complete:
+        return False
 
     file.verified = True
+
+    if not file.meta.expected_md5:
+        return True
+
     await log(
         ctx.ui,
         f"Verifying MD5 checksum for {file.meta.filename}...",
@@ -201,16 +224,17 @@ async def verify_file_hash(ctx: StorageState, file: File) -> None:
             )
 
             filepath.unlink(missing_ok=True)
-
             raise ValueError(err_msg)
         await log(
             ctx.ui,
             f"Integrity confirmed: {file.meta.filename}",
             status="SUCCESS",
         )
+        return True
 
     except (ValueError, OSError) as ve:
         await log(ctx.ui, str(ve), status="ERROR")
+        raise
 
 
 def verify_stream(

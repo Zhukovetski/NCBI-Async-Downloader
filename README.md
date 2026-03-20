@@ -1,23 +1,10 @@
-
-```text
-....................../´¯/)
-....................,/¯../
-.................../..../
-............./´¯/'...'/´¯¯¯/
-........../'/.../..../....././¨¯\
-........('(...´...´.... ¯~/'...')
-.........\.................'.../
-..........''................./
-............\..............(
-..............\.............\...
-```
-Yes, I used AI as a mentor. No, this isn't 'slop'. If you can write a zero-I/O asynchronous stream reordering engine better than this — show me the code.
-Otherwise, enjoy the tool.
-
 # HydraStream
 
+[![PyPI version](https://badge.fury.io/py/hydrastream.svg)](https://pypi.org/project/hydrastream/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Coverage: 90%](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)](https://github.com/Zhukovetski/HydraStream)
+[![Tests](https://github.com/Zhukovetski/HydraStream/actions/workflows/tests.yml/badge.svg)](https://github.com/Zhukovetski/HydraStream/actions/workflows/tests.yml)
 
 HydraStream is a concurrent HTTP downloader written in Python. It supports multipart downloading and in-memory chunk reordering, allowing you to stream remote files directly to `stdout` without writing to disk.
 

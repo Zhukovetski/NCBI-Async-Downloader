@@ -4,6 +4,7 @@
 import base64
 import binascii
 
+from hydrastream.constants import HASH_FILE_MIN_PARTS, MD5_HEX_LENGTH
 from hydrastream.models import NetworkState
 from hydrastream.network import safe_request
 
@@ -21,7 +22,7 @@ async def ncbi_get_expected_hash(
 
     for line in resp.text.splitlines():
         parts = line.split()
-        if len(parts) >= 2 and parts[1].endswith(filename):
+        if len(parts) >= HASH_FILE_MIN_PARTS and parts[1].endswith(filename):
             return line.split()[0]
     return None
 
@@ -45,7 +46,7 @@ async def get_expected_hash(ctx: NetworkState, url: str) -> str | None:
     etag = headers.get("ETag", "")
     if etag and "-" not in etag:
         clean_etag = etag.strip('"').strip("'")
-        if len(clean_etag) == 32:
+        if len(clean_etag) == MD5_HEX_LENGTH:
             return clean_etag
 
     content_md5 = headers.get("Content-MD5")
