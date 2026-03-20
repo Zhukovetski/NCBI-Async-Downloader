@@ -10,6 +10,7 @@ import re
 import time
 import typing
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import TypedDict, Unpack
 from urllib.parse import unquote
 
@@ -239,7 +240,9 @@ async def stream_chunk(
                 )
         await asyncio.sleep(delay)
 
-    raise httpx.RequestError(f"Failed to establish stream for {url} after 3 attempts.")
+    raise httpx.RequestError(
+        f"Failed to establish stream for {url} after {ctx.max_retries} attempts."
+    )
 
 
 def _get_retry_after(response: httpx.Response) -> float | None:
@@ -281,6 +284,7 @@ def extract_filename(url: str, headers: httpx.Headers) -> str:
         filename = "downloaded_file"
 
     filename = re.sub(r'[\\/*?:"<>|]', "_", filename)
+    filename = Path(filename).name
 
     if "." not in filename:
         content_type = headers.get("Content-Type", "").split(";")[0]

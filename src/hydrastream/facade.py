@@ -1,11 +1,12 @@
 # main.py или facade.py
 
 
+import asyncio
 from collections.abc import AsyncGenerator
 from types import TracebackType
 from typing import Any, Self
 
-from hydrastream.engine import run_downloads, stream_all
+from hydrastream.engine import run_downloads, stream_all, teardown_engine
 from hydrastream.models import HydraConfig, HydraContext
 
 
@@ -29,6 +30,7 @@ class HydraClient:
             stream_buffer_size=stream_buffer_size,
             client_kwargs=client_kwargs,
         )
+        self.state: HydraContext
 
     async def __aenter__(self) -> Self:
         return self
@@ -39,7 +41,8 @@ class HydraClient:
         _exc: BaseException | None,
         _tb: TracebackType | None,
     ) -> None:
-        pass
+        loop = asyncio.get_running_loop()
+        await teardown_engine(self.state, loop)
 
     async def run(
         self, links: list[str] | str, expected_checksums: dict[str, str] | None = None

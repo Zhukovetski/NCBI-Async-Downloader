@@ -130,9 +130,11 @@ async def stream_process_chunk(
             async for data in r.aiter_bytes():
                 buffer.extend(data)
                 update(ctx.ui, chunk.filename, len(data))
-            if len(ctx.heap) >= ctx.heap_size:
-                async with ctx.condition:
-                    await ctx.condition.wait_for(lambda: len(ctx.heap) <= ctx.heap_size)
+                if len(ctx.heap) >= ctx.heap_size:
+                    async with ctx.condition:
+                        await ctx.condition.wait_for(
+                            lambda: len(ctx.heap) <= ctx.heap_size
+                        )
             await ctx.stream_queue.put((chunk.current_pos, buffer))
             chunk.current_pos = chunk.current_pos + len(buffer)
             buffer = bytearray()

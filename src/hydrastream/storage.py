@@ -8,7 +8,6 @@ import re
 import shutil
 import tempfile
 from _hashlib import HASH
-from copy import deepcopy
 from pathlib import Path
 
 from hydrastream.monitor import log
@@ -98,8 +97,7 @@ def save_state(ctx: StorageState, file_obj: File) -> None:
 
 
 def save_all_states(ctx: StorageState, files: dict[str, File]) -> None:
-    files_snapshot = deepcopy(files)
-    for file in files_snapshot.values():
+    for file in list(files.values()):
         if not all(c.current_pos > c.end for c in (file.chunks or [])):
             save_state(ctx, file)
 

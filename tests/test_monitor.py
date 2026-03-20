@@ -99,7 +99,8 @@ def test_gradient_columns(mock_ui_state: UIState) -> None:
 # --- ТЕСТЫ ЛОГИРОВАНИЯ (Строки 70, 76-77, 85, 92-115, 122-149) ---
 
 
-def test_write_log(mock_ui_state: UIState) -> None:
+@pytest.mark.asyncio
+async def test_write_log(mock_ui_state: UIState) -> None:
     """Строки 70, 76-77: Запись в файл и обработка OSError"""
     write_log(mock_ui_state, "Test Message")
     assert "Test Message" in mock_ui_state.log_file.read_text()

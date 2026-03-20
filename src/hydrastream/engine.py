@@ -46,22 +46,8 @@ async def stop(ctx: HydraContext, complete: bool = False) -> None:
         ctx.condition.notify_all()
 
 
-async def _teardown_engine(
-    ctx: HydraContext,
-    loop: asyncio.AbstractEventLoop,
-    workers: list[asyncio.Task[None]],
-    task_creator: asyncio.Task[None] | None,
-    autosave_task: asyncio.Task[None] | None = None,
-) -> None:
+async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) -> None:
     """Универсальная глушилка завода. Защищает от копипасты."""
-    await stop(ctx, complete=True)
-
-    # Гасим задачи
-    tasks_to_cancel = [t for t in [task_creator, autosave_task] if t] + workers
-    with contextlib.suppress(asyncio.CancelledError):
-        await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-
-    # Проверка на успех
     if (
         ctx.is_running
         and ctx.ui.total_files > 0
@@ -73,6 +59,19 @@ async def _teardown_engine(
             status="SUCCESS",
             progress=True,
         )
+
+    await stop(ctx, complete=True)
+
+    # Гасим задачи
+    tasks_to_cancel = [
+        t
+        for t in [ctx.task_creator, ctx.autosave_task, *(ctx.workers or [])]
+        if (t and asyncio.iscoroutine(t)) or isinstance(t, asyncio.Task)
+    ]
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
+    # Проверка на успех
 
     # Закрываем ресурсы
     if not ctx.stream:
@@ -110,7 +109,7 @@ async def _stream_one(ctx: HydraContext, filename: str) -> AsyncGenerator[bytes]
                 chunk_bytes = bytes(chunk_data)
 
                 async with ctx.condition:
-                    ctx.condition.notify()
+                    ctx.condition.notify_all()
 
                 if md5_hasher:
                     md5_hasher.update(chunk_bytes)
@@ -162,8 +161,7 @@ async def stream_all(
 ) -> AsyncGenerator[tuple[str, AsyncGenerator[bytes]]]:
     await ui_start(ctx.ui)
     ctx.stream = True
-    if isinstance(links, str):
-        links = [links]
+    links = [links] if isinstance(links, str) else list(links)
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(stop(ctx)))
@@ -201,7 +199,7 @@ async def stream_all(
         raise
 
     finally:
-        await _teardown_engine(ctx, loop, ctx.workers, ctx.task_creator)
+        await teardown_engine(ctx, loop)
 
 
 async def run_downloads(
@@ -211,8 +209,8 @@ async def run_downloads(
 ) -> None:
     await ui_start(ctx.ui)
     ctx.stream = False
-    if isinstance(links, str):
-        links = [links]
+
+    links = [links] if isinstance(links, str) else list(links)
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -230,18 +228,6 @@ async def run_downloads(
         async with ctx.condition:
             await ctx.condition.wait_for(lambda: not (ctx.files and ctx.is_running))
 
-        if (
-            ctx.is_running
-            and ctx.ui.total_files > 0
-            and ctx.ui.total_files == ctx.ui.files_completed
-        ):
-            await log(
-                ctx.ui,
-                "All downloads completed successfully!",
-                status="SUCCESS",
-                progress=True,
-            )
-
     except asyncio.CancelledError:
         pass
 
@@ -250,4 +236,4 @@ async def run_downloads(
         raise
 
     finally:
-        await _teardown_engine(ctx, loop, ctx.workers, ctx.task_creator)
+        await teardown_engine(ctx, loop)

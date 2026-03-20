@@ -244,7 +244,7 @@ async def test_stream_process_chunk(
     await stream_process_chunk(mock_ctx, mock_chunk, headers)
 
     # Проверяем бэкпрешер (куча была полна, значит воркер должен был ждать)
-    mock_ctx.condition.wait_for.assert_called_once()
+    mock_ctx.condition.wait_for.assert_called()
 
     # Проверяем, что байты упали в очередь стрима
     mock_ctx.stream_queue.put.assert_called_once_with((0, bytearray(b"hello world")))

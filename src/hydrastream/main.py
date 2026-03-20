@@ -151,7 +151,7 @@ def cli(
     ] = False,
     chunk_timeout: Annotated[
         float, typer.Option(help="Connection timeout in seconds for chunk downloads.")
-    ] = 30,
+    ] = 120,
     stream_buffer_size: Annotated[
         int | None,
         typer.Option("--buffer", "-b", help="Maximum stream buffer size in bytes."),
