@@ -27,7 +27,7 @@ This project bridges the gap: it fetches chunks concurrently via `httpx` and `uv
 * **Resumption**: Saves partial state for disk-mode downloads to resume after interruptions.
 * **POSIX Compliance**: In stream mode or `--quiet` mode, logs are routed to `stderr` and data to `stdout`.
   
-## 📊 Benchmarks (Python vs C++)
+## Benchmarks (Python vs C++)
 *Tested on GitHub Actions Ubuntu Runners (Gigabit Network) downloading a 1.0GB genomic archive.*
 
 | Tool | Real Time | Language |
