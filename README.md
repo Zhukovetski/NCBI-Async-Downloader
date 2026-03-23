@@ -101,8 +101,46 @@ if __name__ == "__main__":
 
 ## Roadmap
 
-* **v1.2: Autonomous Worker Scaling:** Transition from a static thread pool to adaptive concurrency based on network conditions and downstream backpressure.
-* **v2.0: Rust Core:** Port the core engine to Rust (`tokio`/`reqwest`) with a `PyO3` wrapper to bypass the Python GIL and improve multi-core execution.
+### Technical Roadmap v1.2 (The Resilience Update)
+
+#### 1. Network Layer Overhaul
+*   **Objective:** Bypass Deep Packet Inspection (WAF / TLS Fingerprinting).
+*   **Action:** Replace `httpx` with `curl_cffi.requests.AsyncSession`.
+*   **Implementation:**
+    *   Integrate the `impersonate="chrome110"` (or equivalent) parameter to spoof TLS fingerprints.
+    *   Adapt existing interfaces (timeouts, connection pools, error handling) to the `curl_cffi` API.
+    *   Remove manual header spoofing (`User-Agent`, `Accept-Encoding`), as `curl_cffi` handles this natively at the C-library level.
+
+#### 2. Input/Output Flexibility
+*   **Objective:** Support batch processing and Unix pipeline integration.
+*   **Action 1:** Read URL lists from a file or standard input.
+    *   Implement the `-i / --input` flag (supporting `stdin` via the `-` character).
+*   **Action 2:** Dry-Run mode.
+    *   Add the `--dry-run` flag.
+    *   Terminate the pipeline immediately after the `TaskProducer` execution.
+    *   Output a summary table (file count, total size, MD5 resolution status) without allocating disk space or initializing the `Dispatcher`.
+
+#### 3. Graceful Degradation
+*   **Objective:** Prevent data corruption and bandwidth waste on servers lacking `Range` request support.
+*   **Action:** Analyze the `Accept-Ranges` header during the `TaskProducer` HEAD request.
+*   **Implementation:**
+    *   If `Accept-Ranges: none` is detected, or the server ignores the `Range` header (returning the full file on a partial GET), force a fallback to single-threaded mode (1 chunk per file).
+    *   Bypass `PriorityQueue` chunking logic for the affected file; the download proceeds linearly via a single worker.
+
+#### 4. Architecture & Protocol Design
+*   **Objective:** Decouple the storage subsystem to support future backends (e.g., S3, databases) and prepare for v2.0.
+*   **Action:** Introduce a `StorageBackend` `Protocol` in `models.py` (or a dedicated `interfaces.py`).
+*   **Implementation:**
+    *   Refactor the current `StorageManager` into a `LocalStorageManager` that implements the protocol (requiring methods: `allocate_space`, `open`, `write_chunk`, `close`, `verify`).
+    *   Ensure the core engine (`engine.py` and `Dispatcher`) depends exclusively on the `StorageBackend` interface, abstracting away the concrete implementation.
+
+### **v1.3: Autonomous Worker Scaling:** 
+
+Transition from a static thread pool to adaptive concurrency based on network conditions and downstream backpressure.
+
+### **v2.0: Rust Core:**
+
+Port the core engine to Rust (`tokio`/`reqwest`) with a `PyO3` wrapper to bypass the Python GIL and improve multi-core execution.
 
 ## License
 MIT License.
