@@ -87,18 +87,17 @@ jobs:
       - name: Benchmark 11 - hf_transfer (Rust-based)
         run: |
           echo "Preparing hf_transfer environment..."
-          # Создаем временное окружение и ставим туда hf_transfer
           uv venv hf_env > /dev/null
           uv pip install -p hf_env hf_transfer -q
           
           echo "Testing hf_transfer..."
-          # Запускаем Rust-движок напрямую через Python API
           time ./hf_env/bin/python -c "
           import os, hf_transfer
           hf_transfer.download(
               url=os.environ['TEST_URL'], 
-              filename='hf_test.gz'
+              filename='hf_test.gz',
+              max_files=128,          # Максимальное количество TCP-соединений
+              chunk_size=10485760     # Размер одного чанка (10 MB)
           )"
           
-          # Убираем за собой
           rm -rf hf_test.gz hf_env
