@@ -31,10 +31,30 @@ async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
 
     filename = chunk.file.meta.filename
     file_obj = chunk.file
-    if not await verify_file_hash(ctx.fs, file_obj):
-        return
+    try:
+        if chunk.file.verified or not chunk.file.is_complete:
+            return
+
+        chunk.file.verified = True
+        if not verify_size(ctx.fs, file_obj):
+            return
+        await log(
+            ctx.ui,
+            f"Verifying MD5 checksum for {chunk.file.meta.filename}...",
+            status="INFO",
+        )
+        await verify_file_hash(ctx.fs, file_obj)
+        await log(
+            ctx.ui,
+            f"Integrity confirmed: {chunk.file.meta.filename}",
+            status="SUCCESS",
+        )
+    except (ValueError, OSError) as ve:
+        await log(ctx.ui, str(ve), status="ERROR")
+        raise
+
     file_obj.close_fd()
-    verify_size(ctx.fs, file_obj)
+
     delete_state(ctx.fs, filename)
     await done(ctx.ui, filename)
     del ctx.files[chunk.file.meta.id]
@@ -185,6 +205,7 @@ async def disk_process_chunk(
                 data = cast(bytes, data)
                 buffer.extend(data)
                 update(ctx.ui, chunk.file.meta.filename, len(data))
+                await ctx.ui.limit_event.wait()
                 if len(buffer) >= buffer_size:
                     await write_chunk_data(fd, buffer, chunk.current_pos)
                     chunk.current_pos += len(buffer)
@@ -212,11 +233,7 @@ async def stream_process_chunk(
                 data = cast(bytes, data)
                 buffer.extend(data)
                 update(ctx.ui, chunk.file.meta.filename, len(data))
-                if len(ctx.heap) >= ctx.heap_size and chunk.start < ctx.next_offset:
-                    async with ctx.condition:
-                        await ctx.condition.wait_for(
-                            lambda: len(ctx.heap) < ctx.heap_size
-                        )
+                await ctx.ui.limit_event.wait()
                 if len(buffer) > STREAM_CHUNK_SIZE:
                     await ctx.stream_queue.put((chunk.current_pos, buffer))
                     chunk.current_pos = chunk.current_pos + len(buffer)

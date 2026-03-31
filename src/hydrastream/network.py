@@ -152,6 +152,7 @@ async def safe_request(
     ctx: NetworkState, method: HttpMethod, url: str, **kwargs: Unpack[RequestParams]
 ) -> Response | None:
     for attempt in range(1, ctx.max_retries + 1):
+        response = None
         async with acquire(ctx.rate_limiter):
             try:
                 resp = await ctx.client.request(method, url, **kwargs)  # type: ignore
@@ -169,10 +170,18 @@ async def safe_request(
                 )
 
         if delay is None:
-            return None
+            if response is not None:
+                raise RequestsError(
+                    f"Request failed on {url}",
+                    request=response.request,
+                    response=response,
+                )
+            raise RequestsError(f"Request failed on {url} before response was received")
         await asyncio.sleep(delay)
 
-    return None
+    raise RequestsError(
+        f"Failed to establish request for {url} after {ctx.max_retries} attempts."
+    )
 
 
 @contextlib.asynccontextmanager
@@ -217,10 +226,7 @@ async def stream_chunk(
                     request=response.request,
                     response=response,
                 )
-            else:
-                raise RequestsError(
-                    f"Stream failed on {url} before response was received"
-                )
+            raise RequestsError(f"Stream failed on {url} before response was received")
         await asyncio.sleep(delay)
 
     raise RequestsError(

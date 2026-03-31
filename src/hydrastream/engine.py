@@ -12,11 +12,11 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from typing import TypeVarTuple, Unpack
 
 from hydrastream.dispatcher import download_worker
-from hydrastream.models import HydraContext, TypeHash
+from hydrastream.models import Checksum, HydraContext, TypeHash
 from hydrastream.monitor import done, log, ui_start, ui_stop
 from hydrastream.network import close
 from hydrastream.producer import chunk_producer, dispatch_chunks
-from hydrastream.storage import autosave, save_all_states, verify_stream
+from hydrastream.storage import save_all_states, verify_stream
 
 Ts = TypeVarTuple("Ts")
 
@@ -29,6 +29,18 @@ async def delayed_task(
 ) -> None:
     await asyncio.sleep(delay)
     await task(ctx, *args)
+
+
+async def autosave(ctx: HydraContext, interval: float) -> None:
+    loop = asyncio.get_running_loop()
+    while ctx.is_running:
+        try:
+            await asyncio.sleep(interval)
+            await loop.run_in_executor(None, save_all_states, ctx.fs, ctx.files)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            await log(ctx.ui, f"Auto-save operation failed: {e}", status="ERROR")
 
 
 async def cancel_tasks(ctx: HydraContext) -> None:
@@ -181,13 +193,12 @@ async def _stream_one(ctx: HydraContext, filename: str) -> AsyncGenerator[bytes]
 async def create_tasks(
     ctx: HydraContext,
     links: list[str],
-    expected_checksums: dict[str, tuple[TypeHash, str]] | None,
 ) -> None:
     num_task_creator = math.ceil(len(links) ** 0.4) if len(links) > 1 else 1
     num_task_creator = min(num_task_creator, 20)
     ctx.task_creators = [
         asyncio.create_task(
-            delayed_task(ctx, chunk_producer, expected_checksums),
+            delayed_task(ctx, chunk_producer),
             name=f"Task creator: {i}",
         )
         for i in range(num_task_creator)
@@ -221,14 +232,23 @@ async def create_tasks(
 
 
 async def dispatch_links(
-    ctx: HydraContext, links: str | Iterable[str], loop: asyncio.AbstractEventLoop
+    ctx: HydraContext,
+    links: str | Iterable[str],
+    expected_checksums: dict[str, tuple[TypeHash, str]] | None,
+    loop: asyncio.AbstractEventLoop,
 ) -> None:
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(stop(ctx)))
 
+    checksums = None
     for i, link in enumerate(links):
-        await ctx.links_queue.put((i, link))
+        if expected_checksums is not None:
+            if checksums := expected_checksums.get(link):
+                checksums = Checksum(algorithm=checksums[0], value=checksums[1])
+        else:
+            expected_checksums = None
+        await ctx.links_queue.put((i, link, checksums))
 
 
 async def stream_all(
@@ -245,9 +265,9 @@ async def stream_all(
 
     links = [links] if isinstance(links, str) else list(links)
 
-    await dispatch_links(ctx, links, loop)
+    await dispatch_links(ctx, links, expected_checksums, loop)
 
-    await create_tasks(ctx, links, expected_checksums)
+    await create_tasks(ctx, links)
 
     try:
         while ctx.files and ctx.is_running:
@@ -288,9 +308,9 @@ async def run_downloads(
 
     links = [links] if isinstance(links, str) else list(links)
 
-    await dispatch_links(ctx, links, loop)
+    await dispatch_links(ctx, links, expected_checksums, loop)
 
-    await create_tasks(ctx, links, expected_checksums)
+    await create_tasks(ctx, links)
 
     try:
         async with ctx.condition:

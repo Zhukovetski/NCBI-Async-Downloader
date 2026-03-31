@@ -230,12 +230,16 @@ class File:
 
 @entity
 class UIState:
+    log_file: Path
     no_ui: bool = False
     quiet: bool = False
-    log_file: Path
+    speed_limit: float | None = None
 
     is_running: bool = True
     console: Console = Console(stderr=True)
+    limit_event: asyncio.Event = field(init=False)
+    frequency_speed_limit: int = 100
+    time_speed_limit: float = field(init=False)
 
     start_time: float = 0.0
     total_bytes: int = 0
@@ -266,6 +270,13 @@ class UIState:
 
     def __post_init__(self) -> None:
         self.renewal_rate = 1 / self.refresh_per_second
+
+        if self.speed_limit:
+            self.speed_limit = (self.speed_limit / self.frequency_speed_limit) * 1024**2
+            self.time_speed_limit = 1 / self.frequency_speed_limit
+
+        self.limit_event = asyncio.Event()
+        self.limit_event.set()
 
 
 @entity
@@ -341,6 +352,7 @@ class HydraConfig:
     no_ui: bool = False
     quiet: bool = False
     out_dir: str = "download"
+    speed_limit: float | None = None
     chunk_timeout: float = 120
     stream_buffer_size: int | None = None
     verify: bool = True
@@ -366,8 +378,12 @@ class HydraContext:
     heap: list[tuple[int, bytearray]] = field(
         default_factory=list[tuple[int, bytearray]]
     )
-    links_queue: asyncio.PriorityQueue[tuple[int, str]] = field(init=False)
-    chunk_queue: asyncio.PriorityQueue[tuple[int, Chunk]] = field(init=False)
+    links_queue: asyncio.PriorityQueue[tuple[int, str, Checksum | None]] = field(
+        init=False
+    )
+    chunk_queue: asyncio.PriorityQueue[tuple[int, Chunk] | tuple[int, Chunk]] = field(
+        init=False
+    )
     stream_queue: asyncio.Queue[tuple[int, bytearray]] = field(init=False)
     condition: asyncio.Condition = field(init=False)
 
@@ -395,11 +411,10 @@ class HydraContext:
             is_running=self.is_running,
             no_ui=self.config.no_ui,
             quiet=self.config.quiet,
+            speed_limit=self.config.speed_limit,
             log_file=Path(self.config.out_dir) / "download.log",
         )
-        self.fs = StorageState(
-            ui=self.ui, out_dir=Path(self.config.out_dir), files=self.files
-        )
+
         self.net = NetworkState(
             threads=self.config.threads,
             monitor=self.ui,

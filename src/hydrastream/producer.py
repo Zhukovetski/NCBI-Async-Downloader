@@ -2,8 +2,10 @@
 # Licensed under the MIT License.
 
 import asyncio
+import random
 
-from curl_cffi import Headers
+from curl_cffi import Headers, Response
+from curl_cffi.requests import RequestsError
 
 from hydrastream.constants import MIN_CHUNK, STREAM_CHUNK_SIZE
 from hydrastream.models import Checksum, File, FileMeta, HydraContext, TypeHash
@@ -15,28 +17,22 @@ from hydrastream.storage import create_sparse_file, load_state, open_file
 
 async def chunk_producer(
     ctx: HydraContext,
-    expected_checksums: dict[str, tuple[TypeHash, str]] | None = None,
 ) -> None:
-    checksums_map = expected_checksums or {}
 
     while not ctx.links_queue.empty():
-        id, url = await ctx.links_queue.get()
+        id, url, checksum = await ctx.links_queue.get()
 
         if not ctx.is_running:
             break
 
         try:
             meta = await _fetch_metadata(ctx, url)
-            if not meta:
-                continue
 
             filename, total_size, supports_ranges = meta
             checksum = None
 
             if ctx.config.verify:
-                checksum = await _resolve_md5(
-                    ctx, url, filename, checksums_map.get(url)
-                )
+                checksum = await _resolve_md5(ctx, url, filename, checksum)
             file_obj = await _prepare_file_object(
                 ctx,
                 id=id,
@@ -53,27 +49,64 @@ async def chunk_producer(
 
         except asyncio.CancelledError:
             break
+
+        except RequestsError as e:
+            response = e.response  # type: ignore
+
+            if isinstance(response, Response):
+                status = response.status_code
+
+                if url and status in {400, 401, 403, 404, 410, 416}:
+                    await log(
+                        ctx.ui,
+                        f"Link {url} failed permanently (HTTP {status}).",
+                        status="ERROR",
+                    )
+                    continue
+
+                # Остальные ошибки сервера (5xx, 429) — пробуем перекинуть ссылку
+                # в очередь
+                await requeue_chunk(ctx, url, checksum, delay_range=(0.5, 2.0))
+            # 2. Если ответа нет (Сетевая ошибка / CurlError / Timeout)
+            else:
+                await requeue_chunk(ctx, url, checksum)
+
+        except TimeoutError:
+            await requeue_chunk(ctx, url, checksum)
         except OSError as e:
             await log(ctx.ui, f"OS/Disk Error: {e}", status="CRITICAL")
             ctx.is_running = False
             break
         except Exception as e:
-            await log(ctx.ui, f"Failed to process URL {url}: {e}", status="ERROR")
+            await log(
+                ctx.ui, f"Critical Task creator Exception: {e!r}", status="CRITICAL"
+            )
+            raise
+        finally:
+            ctx.chunk_queue.task_done()
 
 
-async def _fetch_metadata(ctx: HydraContext, url: str) -> tuple[str, int, bool] | None:
+async def requeue_chunk(
+    ctx: HydraContext,
+    url: str,
+    checksum: Checksum | None,
+    delay_range: tuple[float, float] = (1.0, 3.0),
+) -> None:
+
+    await ctx.links_queue.put((-1, url, checksum))
+    delay = random.uniform(*delay_range)
+    await asyncio.sleep(delay)
+
+
+async def _fetch_metadata(ctx: HydraContext, url: str) -> tuple[str, int, bool]:
     # 1. Пробуем HEAD
     response = await safe_request(ctx.net, "HEAD", url=url)
     # 2. Если HEAD не дал инфы, используем GET, но ОБЯЗАТЕЛЬНО через stream
     if response is None or int(response.headers.get("content-length", 0)) == 0:
-        try:  # Используем stream, чтобы не грузить файл в память!
-            # Контекстный менеджер 'async with' сам закроет соединение в конце
-            async with stream_chunk(ctx.net, url, ctx.config.chunk_timeout) as resp:
-                headers = resp.headers
-                return parse_headers(url, headers)
-        except Exception as e:
-            await log(ctx.ui, f"Failed GET metadata for {url}: {e}", status="ERROR")
-            return None
+        # Контекстный менеджер 'async with' сам закроет соединение в конце
+        async with stream_chunk(ctx.net, url, ctx.config.chunk_timeout) as resp:
+            headers = resp.headers
+            return parse_headers(url, headers)
 
     return parse_headers(url, response.headers)
 
@@ -188,7 +221,10 @@ async def dispatch_chunks(ctx: HydraContext) -> None:
             if not ctx.is_running:
                 break
             if c.current_pos <= c.end:
-                await ctx.chunk_queue.put((priority_index, c))
+                if ctx.stream:
+                    await ctx.chunk_queue.put((priority_index, c))
+                else:
+                    await ctx.chunk_queue.put((c, priority_index))  # type: ignore
         ctx.current_file_id.append(priority_index)
 
         async with ctx.condition:

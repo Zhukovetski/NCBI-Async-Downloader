@@ -175,6 +175,21 @@ async def log_worker(ctx: UIState) -> None:
             ctx.log_queue.task_done()
 
 
+async def speed_limiter(ctx: UIState) -> None:
+    prev = 0
+    time = ctx.time_speed_limit
+    if ctx.speed_limit is None:
+        return
+    while ctx.is_running:
+        d_time = (ctx.download_bytes - prev) / (ctx.speed_limit)
+        if d_time > 1:
+            ctx.limit_event.clear()
+            await asyncio.sleep(ctx.time_speed_limit * d_time)
+            ctx.limit_event.set()
+        prev = ctx.download_bytes
+        await asyncio.sleep(time)
+
+
 def add_file(ctx: UIState, filename: str, total_size: int | None = None) -> None:
     if total_size is not None:
         ctx.total_bytes += total_size
