@@ -103,7 +103,7 @@ async def _evaluate_failure(
             return None
 
         server_delay = _get_retry_after(response)
-        if response.status_code == 429:
+        if response.status_code in [429, 503]:
             await report_429(ctx.rate_limiter, server_delay)
 
         delay = (
