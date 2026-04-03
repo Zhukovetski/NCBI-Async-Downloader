@@ -9,7 +9,7 @@ from types import TracebackType
 from typing import Any, Self
 
 from .engine import run_downloads, stream_all, teardown_engine
-from .interfaces import LocalStorageManager
+from .interfaces import LocalStorageManager, StorageBackend
 from .models import HydraConfig, HydraContext, TypeHash
 
 
@@ -29,6 +29,7 @@ class HydraClient:
         json_logs: bool = False,
         verify: bool = True,
         client_kwargs: dict[str, Any] | None = None,
+        fs: StorageBackend | None = None,
     ) -> None:
         if config:
             self.config = config
@@ -49,7 +50,10 @@ class HydraClient:
             )
 
         self.state: HydraContext | None = None
-        self.fs = LocalStorageManager(output_dir=Path(self.config.output_dir))
+        if fs:
+            self.fs = fs
+        else:
+            self.fs = LocalStorageManager(output_dir=Path(self.config.output_dir))
 
     async def __aenter__(self) -> Self:
         return self

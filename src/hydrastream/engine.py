@@ -10,6 +10,7 @@ import random
 import signal
 from _hashlib import HASH
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from typing import TypeVarTuple, Unpack
 
 from .dispatcher import download_worker
@@ -298,11 +299,17 @@ async def run_downloads(
     expected_checksums: dict[str, tuple[TypeHash, str]] | None,
 ) -> None:
 
+    loop = asyncio.get_running_loop()
+    optimal_threads = ctx.config.threads + 4
+    max_safe_threads = min(optimal_threads, 64)
+    custom_pool = ThreadPoolExecutor(
+        max_workers=max_safe_threads, thread_name_prefix="HydraIO"
+    )
+    loop.set_default_executor(custom_pool)
+
     await ui_start(ctx.ui)
 
     ctx.stream = False
-
-    loop = asyncio.get_running_loop()
 
     links = [links] if isinstance(links, str) else list(links)
 
@@ -327,6 +334,7 @@ async def run_downloads(
 
     finally:
         await teardown_engine(ctx, loop)
+        custom_pool.shutdown(wait=True)
 
 
 def save_all_states(ctx: HydraContext, files: dict[int, File]) -> None:

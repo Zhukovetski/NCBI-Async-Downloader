@@ -13,7 +13,7 @@ from .network import extract_filename, safe_request, stream_chunk
 from .providers import ProviderRouter
 
 
-async def chunk_producer(
+async def chunk_producer(  # noqa
     ctx: HydraContext,
 ) -> None:
 

@@ -1,0 +1,96 @@
+name: Combat Benchmark (WAF & TLS Bypass)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  combat-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          # 1. MLOps цель (Hugging Face - Cloudflare) ~ 500 MB
+          - name: "Hugging Face (Cloudflare WAF)"
+            url: "https://huggingface.co/gpt2/resolve/main/model.safetensors"
+          
+          # 2. Биоинформатика (EBI - Strict TLS Fingerprinting)
+          - name: "EBI (Strict TLS Firewall)"
+            url: "https://ftp.sra.ebi.ac.uk/vol1/fastq/ERR022/ERR022003/ERR022003_1.fastq.gz"
+            
+          # 3. Государственный архив (NCBI - Rate Limits & 503 Errors)
+          - name: "NCBI (Standard High-Latency)"
+            url: "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.fna.gz"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          
+      - run: |
+          uv python install 3.11
+          uv tool install .
+          sudo apt-get update && sudo apt-get install -y aria2
+          uv venv hf_env > /dev/null
+          uv pip install -p hf_env hf_transfer -q
+
+      - name: "Target: ${{ matrix.target.name }}"
+        run: echo "Starting benchmark against ${{ matrix.target.name }}"
+
+      # ---------------------------------------------------------
+      # 1. WGET (Single Thread, Old School)
+      # ---------------------------------------------------------
+      - name: Test 1 - WGET
+        run: |
+          echo "Testing wget..."
+          time wget -q "${{ matrix.target.url }}" -O test_wget.bin || echo "❌ WGET FAILED (Likely 403/503)"
+          rm -f test_wget.bin
+
+      # ---------------------------------------------------------
+      # 2. ARIA2C (16 Threads, C++)
+      # ---------------------------------------------------------
+      - name: Test 2 - ARIA2 (16 connections)
+        run: |
+          echo "Testing aria2c..."
+          time aria2c -x 16 -s 16 -q "${{ matrix.target.url }}" -o test_aria.bin || echo "❌ ARIA2 FAILED (Likely 403/503)"
+          rm -f test_aria.bin
+
+      # ---------------------------------------------------------
+      # 3. HF_TRANSFER (Rust, 128 Threads)
+      # ---------------------------------------------------------
+      - name: Test 3 - hf_transfer (Rust-based)
+        run: |
+          echo "Testing hf_transfer..."
+          time ./hf_env/bin/python -c "
+          import os, sys, hf_transfer
+          try:
+              hf_transfer.download(
+                  url='${{ matrix.target.url }}', 
+                  filename='test_hf.bin',
+                  max_files=128,
+                  chunk_size=10485760
+              )
+          except Exception as e:
+              print(f'❌ HF_TRANSFER FAILED: {e}')
+          " || true
+          rm -f test_hf.bin
+
+      # ---------------------------------------------------------
+      # 4. HYDRASTREAM (20 Threads, curl_cffi TLS Spoofing)
+      # ---------------------------------------------------------
+      - name: Test 4 - HydraStream (20 connections)
+        run: |
+          echo "Testing HydraStream..."
+          time hs "${{ matrix.target.url }}" -t 20 -q --no-verify -o ./test_hs.bin || echo "❌ HYDRASTREAM FAILED"
+          rm -f test_hs.bin
+
+         # 5. HYDRASTREAM (Streaming to /dev/null)
+      # ---------------------------------------------------------
+      - name: Test 5 - HydraStream STREAM MODE (20 connections)
+        run: |
+          echo "Testing HydraStream in pure streaming mode..."
+          time hs "${{ matrix.target.url }}" -t 20 -q --no-verify --stream > /dev/null || echo "❌ HYDRASTREAM STREAM FAILED"
