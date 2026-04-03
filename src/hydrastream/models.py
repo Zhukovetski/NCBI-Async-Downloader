@@ -236,6 +236,9 @@ class UIState:
     frequency_speed_limit: int = 100
     time_speed_limit: float = field(init=False)
 
+    has_hash: int = 0
+    ranges: int = 0
+
     start_time: float = 0.0
     total_bytes: int = 0
     download_bytes: int = 0

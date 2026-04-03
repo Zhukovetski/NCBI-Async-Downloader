@@ -350,6 +350,14 @@ def make_panel(ctx: UIState) -> Panel | str:
 
         grid.add_row("[white]Total files:", f"[green3]{ctx.total_files}[/]")
         grid.add_row("[white]Total Data:", f"[bold cyan]{size_str}[/]")
+        if ctx.verify:
+            grid.add_row(
+                "[white]Hash Found:",
+                f"[bold yellow]{ctx.has_hash}/{ctx.total_files}[/]",
+            )
+        grid.add_row(
+            "[white]Ranges:", f"[bold magenta]{ctx.ranges}/{ctx.total_files}[/]"
+        )
         return Panel(
             grid,
             title="[#2e8b57]Final Report",
@@ -427,8 +435,18 @@ async def print_dry_run_report(
         f.create_chunks()
         size_mb = f.meta.content_length / (1024 * 1024)
         if ctx.verify:
-            has_hash = "✅" if f.meta.expected_checksum else "❌"
-        ranges = "✅" if f.meta.supports_ranges else "❌ (Fallback to 1 thread)"
+            if f.meta.expected_checksum:
+                has_hash = "✅"
+                ctx.has_hash += 1
+            else:
+                has_hash = "❌"
+
+        if f.meta.supports_ranges:
+            ranges = "✅"
+            ctx.ranges += 1
+        else:
+            ranges = "❌ (Fallback to 1 thread)"
+
         if ctx.verify:
             table.add_row(
                 f.meta.filename,
@@ -465,7 +483,7 @@ async def print_dry_run_report(
             else:
                 ctx.console.print(
                     f"\n[bold green] Disk space check passed "
-                    f"({free_space / (1024**3):.2f} GB free).[/]"
+                    f"({free_space / (1024**3):.2f} GB free).[/]\n"
                 )
         except OSError:
             pass  # Игнорируем ошибки доступа при проверке места
