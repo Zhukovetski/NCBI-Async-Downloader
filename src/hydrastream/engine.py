@@ -78,6 +78,7 @@ async def stop(ctx: HydraContext, complete: bool = False) -> None:
     if ctx.stream:
         with contextlib.suppress(asyncio.QueueFull):
             ctx.stream_queue.put_nowait((-1, bytearray()))
+            ctx.file_discovery_queue.put_nowait(-1)
 
     async with ctx.condition:
         ctx.condition.notify_all()
@@ -101,24 +102,21 @@ async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) ->
     tasks_to_cancel = [
         t
         for t in [
-            *(ctx.task_creators or []),  # Распаковываем список продюсеров
-            ctx.autosave_task,  # Единичный таск
-            *(ctx.workers or []),  # Распаковываем список воркеров
+            *ctx.task_creators,
+            ctx.autosave_task,
+            *ctx.workers,
             ctx.dispatcher,
         ]
-        if isinstance(t, asyncio.Task)  # iscoroutine убираем, мы создаем только Tasks!
+        if isinstance(t, asyncio.Task)
     ]
     with contextlib.suppress(asyncio.CancelledError):
         await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
 
-    # Проверка на успех
-
-    # Закрываем ресурсы
     if not ctx.stream:
         save_all_states(ctx, ctx.files)
+
         for file_obj in ctx.files.values():
             ctx.fs.close_file(file_obj.fd)
-
     await ui_stop(ctx.ui)
 
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -187,6 +185,8 @@ async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[bytes]:
         ctx.heap.clear()
         del ctx.files[file_id]
         ctx.current_file_id.remove(file_id)
+        async with ctx.condition:
+            ctx.condition.notify_all()
 
 
 async def create_tasks(
@@ -219,7 +219,7 @@ async def create_tasks(
         if ctx.task_creators:
             for task in ctx.task_creators:
                 await task
-        await print_dry_run_report(ctx.ui, ctx.files, ctx.stream, ctx.config.out_dir)
+        await print_dry_run_report(ctx.ui, ctx.files, ctx.stream, ctx.config.output_dir)
         ctx.files.clear()
     else:
         ctx.dispatcher = asyncio.create_task(dispatch_chunks(ctx), name="Dispather")
@@ -271,18 +271,16 @@ async def stream_all(
     await create_tasks(ctx, links)
 
     try:
-        while (ctx.dispatcher or ctx.files) and ctx.is_running:
+        while (not ctx.dispatcher.done() or ctx.files) and ctx.is_running:
             file_id = await ctx.file_discovery_queue.get()
-
+            if file_id == -1:
+                break
             filename = ctx.files[file_id].meta.filename
 
             file_gen = _stream_one(ctx, file_id)
 
             yield filename, file_gen
-            async with ctx.condition:
-                await ctx.condition.wait_for(
-                    lambda id=id: id not in ctx.files or not ctx.is_running
-                )
+            ctx.file_discovery_queue.task_done()
     except asyncio.CancelledError:
         pass
 
@@ -315,7 +313,9 @@ async def run_downloads(
     try:
         async with ctx.condition:
             await ctx.condition.wait_for(
-                lambda: not ((ctx.dispatcher or ctx.files) and ctx.is_running)
+                lambda: (
+                    not ((not ctx.dispatcher.done() or ctx.files) and ctx.is_running)
+                )
             )
     except asyncio.CancelledError:
         pass

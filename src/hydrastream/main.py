@@ -3,14 +3,18 @@
 
 import asyncio
 import sys
+from collections.abc import Generator
+from contextlib import contextmanager
+from io import TextIOWrapper
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, TextIO
 from urllib.parse import urlparse
 
 import typer
 
 from hydrastream import __version__
 from hydrastream.facade import HydraClient
+from hydrastream.models import TypeHash
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
@@ -22,94 +26,145 @@ def version_callback(value: bool) -> None:
 
 
 def is_valid_url(url: str) -> bool:
-    """Проверяет, является ли строка корректным URL."""
+    """Checks if a given string is a structurally valid HTTP/HTTPS URL."""
     try:
         result = urlparse(url)
-        # Урл считается валидным, если есть протокол (http/https) и домен
-        return all([result.scheme in ("http", "https"), result.netloc])
+        return result.scheme in ("http", "https") and bool(result.netloc)
     except ValueError:
         return False
 
 
+@contextmanager
+def get_input_stream(
+    filepath: str,
+) -> Generator[TextIO | Any | TextIOWrapper, Any, None]:
+    """Context manager for reading from a file or standard input (pipe)."""
+    if filepath == "-":
+        yield sys.stdin
+    else:
+        path = Path(filepath).expanduser().resolve()
+
+        if not path.exists():
+            typer.secho(f"Error: Path does not exist: {path}", fg="red", err=True)
+            raise typer.Exit(code=2)
+        if not path.is_file():
+            typer.secho(
+                f"Error: Target is a directory, not a file: {path}",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
+        try:
+            with path.open(encoding="utf-8") as f:
+                yield f
+        except PermissionError:
+            typer.secho(f"Error: Permission denied: {path}", fg="red", err=True)
+            raise typer.Exit(code=2) from None
+
+
 def parse_urls(links_from_args: list[str] | None, filepath: str | None) -> list[str]:
-    all_links: list[str] = []
+    """
+    Extracts, validates, and deduplicates URLs from both CLI arguments and
+    an input file/stdin.
+    Preserves the original order of URLs.
+    """
+    all_links = []
 
-    # 1. Ссылки из аргументов
+    # 1. Ссылки из прямых аргументов (hs url1 url2)
     if links_from_args:
-        all_links.extend([url for url in links_from_args if is_valid_url(url)])
+        all_links.extend(url for url in links_from_args if is_valid_url(url))
 
-    # 2. Обработка файла или stdin
+    # 2. Обработка файла или пайпа (hs -i urls.txt или hs -i -)
     if filepath:
         try:
-            if filepath == "-":
-                source = sys.stdin
-                # Читаем до конца ввода (Ctrl+D)
-                for line in source:
-                    process_line(line, all_links)
-            else:
-                with Path(filepath).open(encoding="utf-8") as f:
-                    for line in f:
-                        process_line(line, all_links)
-        except (FileNotFoundError, PermissionError) as e:
-            print(f"Ошибка при чтении файла: {e}", file=sys.stderr)
+            with get_input_stream(filepath) as stream:
+                for line in stream:
+                    clean_line = line.strip()
+                    if clean_line and not clean_line.startswith("#"):
+                        # Берем первое слово, отсекая комментарии или пробелы в конце
+                        url = clean_line.split()[0]
+                        if is_valid_url(url):
+                            all_links.append(url)
+        except (FileNotFoundError, PermissionError, OSError) as e:
+            typer.secho(f"Read error: {e}", fg="red", err=True)
+            raise typer.Exit(code=2) from None
 
-    return list(set(all_links))
-
-
-def process_line(line: str, links_list: list[str]) -> None:
-    """Очищает строку и добавляет валидные ссылки в список."""
-    clean_line = line.strip()
-    if clean_line and not clean_line.startswith("#"):
-        # split()[0] берет первое слово, если в строке есть лишний мусор
-        url = clean_line.split()[0]
-        if is_valid_url(url):
-            links_list.append(url)
+    # Используем dict.fromkeys для удаления дубликатов с сохранением порядка
+    return list(dict.fromkeys(all_links))
 
 
 async def async_main(
-    links: list[str],
+    links: list[str] | None,
+    input_file: str | None,
+    typehash: TypeHash,
+    hash: str | None,
     stream: bool,
     threads: int,
     no_ui: bool,
     quiet: bool,
     output_dir: str,
-    hash: str | None,
+    dry_run: bool,
+    min_chunk_size_mb: int,
+    min_stream_chunk_size_mb: int,
     stream_buffer_size_mb: int | None,
+    speed_limit: float | None,
+    json_logs: bool,
     verify: bool,
 ) -> None:
     """
-    Core asynchronous execution function for downloading or streaming files.
+    Core asynchronous orchestrator for downloading or streaming files.
 
     Args:
-        links (list[str]): List of target URLs.
-        stream (bool): Whether to stream data to stdout instead of writing to disk.
-        threads (int): Maximum number of concurrent download threads.
-        no_ui (bool): Disable GUI (plain text logs only) if set to True.
-        quiet (bool): Dead silence. No console output at all if set to True.
-        output_dir (str): Destination directory for downloaded files.
-        hash (str | None): Expected hash checksum (only evaluated if a single link is
-        provided).
-        chunk_timeout (float): Timeout in seconds for individual chunk requests.
-        stream_buffer_size (int | None): Maximum buffer size for in-memory streaming.
-    """
-    expected_checksums: dict[str, str] = {}
+        links: List of target URLs provided via positional arguments.
+        input_file: Path to a text file containing URLs, or '-' for stdin.
+        typehash: Hash algorithm type (e.g., md5, sha256).
+        hash: Expected hash checksum (only evaluated if a single valid link is provided).
+        stream: Whether to stream data to stdout instead of writing to disk.
+        threads: Maximum number of concurrent download connections.
+        no_ui: Disable GUI (plain text logs only) if set to True.
+        quiet: Dead silence mode. No console output at all if set to True.
+        output_dir: Destination directory for downloaded files.
+        dry_run: Simulate the download process (metadata fetch only).
+        min_chunk_size_mb: Minimum chunk size in MB for disk mode.
+        min_stream_chunk_size_mb: Target chunk size in MB for stream mode.
+        stream_buffer_size_mb: Maximum memory buffer size in MB for streaming.
+        speed_limit: Global bandwidth throttle limit in MB/s.
+        json_logs: Output logs in structured JSON Lines format.
+        verify: Enable or disable post-download hash verification.
+    """  # noqa: E501
+
+    # ВСЕГДА парсим ссылки, чтобы отфильтровать мусор и дубликаты из прямых аргументов!
+    valid_links = parse_urls(links, input_file)
+
+    if not valid_links:
+        typer.secho("No valid URLs found to process!", fg="red", bold=True, err=True)
+        raise typer.Exit(code=1)
+
+    expected_checksums: dict[str, tuple[TypeHash, str]] = {}
 
     # Hash logic: only map the hash if a single URL is provided
-    if hash and len(links) == 1:
-        expected_checksums[links[0]] = hash
-    elif hash and len(links) > 1:
+    if hash and len(valid_links) == 1:
+        expected_checksums[valid_links[0]] = (typehash, hash)
+    elif hash and len(valid_links) > 1:
         typer.secho(
             "Warning: The --hash flag is ignored when multiple URLs are provided.",
             fg="yellow",
             err=True,
         )
+        raise typer.Exit(code=1)
 
     async with HydraClient(
         threads=threads,
+        dry_run=dry_run,
+        min_chunk_size_mb=min_chunk_size_mb,
+        min_stream_chunk_size_mb=min_stream_chunk_size_mb,
+        speed_limit=speed_limit,
         no_ui=no_ui,
         quiet=quiet,
-        out_dir=output_dir,
+        output_dir=output_dir,
         stream_buffer_size_mb=stream_buffer_size_mb,
+        json_logs=json_logs,
         verify=verify,
         client_kwargs=None,
     ) as loader:
@@ -117,7 +172,7 @@ async def async_main(
             assert sys.__stdout__ is not None
             is_terminal = sys.__stdout__.isatty()
 
-            if is_terminal:
+            if is_terminal and not dry_run:
                 typer.secho(
                     "Warning: You are running in --stream mode but output "
                     "is not redirected!\n"
@@ -142,7 +197,7 @@ async def async_main(
                     err=True,
                 )
 
-            async for _, file_gen in loader.stream(links, expected_checksums):
+            async for _, file_gen in loader.stream(valid_links, expected_checksums):
                 async for chunk in file_gen:
                     if not is_terminal:
                         sys.stdout.buffer.write(chunk)
@@ -152,18 +207,24 @@ async def async_main(
                 if not is_terminal:
                     sys.stdout.buffer.flush()
         else:
-            await loader.run(links, expected_checksums)
+            await loader.run(valid_links, expected_checksums)
 
 
 @app.command()
 def cli(
     links: Annotated[
-        list[str], typer.Argument(help="List of target URLs to download.")
-    ],
+        list[str] | None, typer.Argument(help="List of target URLs to download.")
+    ] = None,
     input_file: Annotated[
         str | None,
         typer.Option("-i", "--input", help="Read URLs from file or '-' for stdin"),
     ] = None,
+    typehash: Annotated[
+        TypeHash,
+        typer.Option(
+            "--typehash", "-th", help="Hash algorithm type (e.g., md5, sha256)."
+        ),
+    ] = "md5",
     hash: Annotated[
         str | None,
         typer.Option(
@@ -181,7 +242,7 @@ def cli(
         typer.Option(
             "-t", "--threads", help="Number of concurrent download connections."
         ),
-    ] = 3,
+    ] = 1,
     stream: Annotated[
         bool,
         typer.Option(
@@ -190,10 +251,44 @@ def cli(
             help="Enable streaming mode (outputs to stdout without saving to disk).",
         ),
     ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="""Simulate the process: fetch metadata, check disk space, and print a
+             report without downloading data.""",
+        ),
+    ] = False,
+    min_chunk_size_mb: Annotated[
+        int,
+        typer.Option(
+            "--min-chunk-mb",
+            help="Minimum chunk size in Megabytes for standard disk downloads.",
+        ),
+    ] = 1,
+    min_stream_chunk_size_mb: Annotated[
+        int,
+        typer.Option(
+            "--stream-chunk-mb",
+            help="Target chunk size in Megabytes for streaming mode.",
+        ),
+    ] = 5,
+    stream_buffer_size_mb: Annotated[
+        int | None,
+        typer.Option(
+            "--buffer",
+            "-b",
+            help="Maximum stream buffer size in Megabytes to prevent OOM.",
+        ),
+    ] = None,
+    speed_limit: Annotated[
+        float | None,
+        typer.Option("--limit", "-l", help="Global download speed limit in MB/s."),
+    ] = None,
     no_ui: Annotated[
         bool,
         typer.Option(
-            "--no-ui", "-nu", help="Disable GUI (plain text logs only) if set to True"
+            "--no-ui", "-nu", help="Disable GUI (plain text logs only) if set to True."
         ),
     ] = False,
     quiet: Annotated[
@@ -206,10 +301,6 @@ def cli(
             "--json", "-j", help="Output logs in JSON Lines format (for machines)."
         ),
     ] = False,
-    stream_buffer_size_mb: Annotated[
-        int | None,
-        typer.Option("--buffer", "-b", help="Maximum stream buffer size in bytes."),
-    ] = None,
     verify: Annotated[
         bool,
         typer.Option(
@@ -225,10 +316,15 @@ def cli(
 ) -> None:
     """
     HydraStream: Concurrent HTTP downloader with in-memory stream reordering
-    (httpx + uvloop).
+    (curl_cffi + uvloop).
     """
-    if not links:
-        typer.secho("No URLs provided for download!", fg="red", bold=True, err=True)
+    if not links and not input_file:
+        typer.secho(
+            "You must provide either[LINKS] or an --input file.",
+            fg="red",
+            bold=True,
+            err=True,
+        )
         raise typer.Exit(code=1)
 
     try:
@@ -243,13 +339,20 @@ def cli(
         asyncio.run(
             async_main(
                 links=links,
+                input_file=input_file,
+                typehash=typehash,
+                hash=hash,
                 stream=stream,
                 threads=threads,
+                dry_run=dry_run,
+                min_chunk_size_mb=min_chunk_size_mb,
+                min_stream_chunk_size_mb=min_stream_chunk_size_mb,
+                speed_limit=speed_limit,
                 no_ui=no_ui,
                 quiet=quiet,
                 output_dir=output_dir,
-                hash=hash,
                 stream_buffer_size_mb=stream_buffer_size_mb,
+                json_logs=json_logs,
                 verify=verify,
             )
         )

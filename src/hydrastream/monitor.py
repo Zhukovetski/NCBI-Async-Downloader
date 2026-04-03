@@ -332,9 +332,26 @@ def make_panel(ctx: UIState) -> Panel | str:
         grid.add_row("[white]Total Data:", f"[bold cyan]{size_str}[/]")
         grid.add_row("[white]Average Speed:", f"[bold yellow]{speed_str}[/]")
         grid.add_row("[white]Total Time:", f"[bold magenta]{time_str}[/]")
-
         return Panel(
             content,
+            title="[#2e8b57]Final Report",
+            border_style="#2e8b57",
+            expand=False,
+        )
+
+    if ctx.dry_run:
+        if ctx.total_bytes < 1_073_741_824:
+            size_str = f"{ctx.total_bytes / (1024**2):.2f} MB"
+        else:
+            size_str = f"{ctx.total_bytes / (1024**3):.2f} GB"
+        grid = Table.grid(expand=True)
+        grid.add_column()
+        grid.add_column(justify="center")
+
+        grid.add_row("[white]Total files:", f"[green3]{ctx.total_files}[/]")
+        grid.add_row("[white]Total Data:", f"[bold cyan]{size_str}[/]")
+        return Panel(
+            grid,
             title="[#2e8b57]Final Report",
             border_style="#2e8b57",
             expand=False,
@@ -355,7 +372,7 @@ def make_panel(ctx: UIState) -> Panel | str:
 
 
 async def print_dry_run_report(
-    ctx: UIState, files: dict[int, File], stream: bool, out_dir: str | Path
+    ctx: UIState, files: dict[int, File], stream: bool, output_dir: str | Path
 ) -> None:
     """Выводит отчет о том, что БЫЛО БЫ сделано, без фактического скачивания."""
 
@@ -398,9 +415,7 @@ async def print_dry_run_report(
         return
 
     # 3. Красивый UI для людей
-    table = Table(
-        title="[bold yellow]🔍 DRY RUN REPORT (No data will be downloaded)[/]"
-    )
+    table = Table(title="[bold yellow] DRY RUN REPORT (No data will be downloaded)[/]")
     table.add_column("Filename", style="cyan", no_wrap=True)
     table.add_column("Size", justify="right")
     table.add_column("Chunks", justify="right")
@@ -408,6 +423,7 @@ async def print_dry_run_report(
     table.add_column("Ranges", justify="center")
 
     for f in files.values():
+        f.create_chunks()
         size_mb = f.meta.content_length / (1024 * 1024)
 
         has_hash = "✅" if f.meta.expected_checksum else "❌"
@@ -422,12 +438,12 @@ async def print_dry_run_report(
 
     # 4. Проверка свободного места (Только для режима диска)
     if not stream:
-        # ctx.config.out_dir мы парсим через Path, как ты делал в Storage
+        # ctx.config.output_dir мы парсим через Path, как ты делал в Storage
 
-        out_dir = Path(out_dir).expanduser().resolve()
+        output_dir = Path(output_dir).expanduser().resolve()
 
         # Если папки еще нет, проверяем место на родительском диске
-        check_dir = out_dir if out_dir.exists() else out_dir.parent
+        check_dir = output_dir if output_dir.exists() else output_dir.parent
 
         try:
             free_space = shutil.disk_usage(check_dir).free
@@ -452,7 +468,6 @@ async def handle_exit(ctx: UIState, cancelled: bool = False) -> None:
         ctx.live.stop()
         if ctx.refresh:
             ctx.refresh.cancel()
-
     elapsed = time.monotonic() - ctx.start_time
     avg_speed = (ctx.download_bytes / elapsed) / (1024**2) if elapsed > 0 else 0
 
@@ -479,7 +494,6 @@ async def handle_exit(ctx: UIState, cancelled: bool = False) -> None:
         f"Total Time:    {time_str}\n"
         f"--------------------------------"
     )
-
     await log(ctx, report)
 
 
@@ -522,6 +536,7 @@ async def ui_start(ctx: UIState) -> None:
             console=ctx.console,
             auto_refresh=True,
             refresh_per_second=10,
+            transient=False,
         )
         ctx.live.start()
         ctx.refresh = asyncio.create_task(refresh_loop(ctx))

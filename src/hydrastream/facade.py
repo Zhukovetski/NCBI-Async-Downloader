@@ -19,22 +19,33 @@ class HydraClient:
         threads: int = 1,
         no_ui: bool = False,
         quiet: bool = False,
-        out_dir: str = "download",
+        output_dir: str = "download",
+        dry_run: bool = False,
+        min_chunk_size_mb: int = 1,
+        min_stream_chunk_size_mb: int = 5,
         stream_buffer_size_mb: int | None = None,
+        speed_limit: float | None = None,
+        json_logs: bool = False,
         verify: bool = True,
         client_kwargs: dict[str, Any] | None = None,
     ) -> None:
         self.config = HydraConfig(
             threads=threads,
+            dry_run=dry_run,
+            min_chunk_size_mb=min_chunk_size_mb,
+            min_stream_chunk_size_mb=min_stream_chunk_size_mb,
+            speed_limit=speed_limit,
             no_ui=no_ui,
             quiet=quiet,
-            out_dir=out_dir,
+            output_dir=output_dir,
             stream_buffer_size_mb=stream_buffer_size_mb,
+            json_logs=json_logs,
             verify=verify,
             client_kwargs=client_kwargs,
         )
+
         self.state: HydraContext | None = None
-        self.fs = LocalStorageManager(out_dir=Path(self.config.out_dir))
+        self.fs = LocalStorageManager(output_dir=Path(self.config.output_dir))
 
     async def __aenter__(self) -> Self:
         return self

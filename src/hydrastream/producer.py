@@ -40,7 +40,7 @@ async def chunk_producer(
                 supports_ranges=supports_ranges,
                 checksum=checksum,
             )
-            if not ctx.stream:
+            if not ctx.stream and not ctx.config.dry_run:
                 file_obj.fd = ctx.fs.open_file(filename=file_obj.meta.filename)
 
             await _register_file(ctx, file_obj, id)
@@ -81,7 +81,7 @@ async def chunk_producer(
             )
             raise
         finally:
-            ctx.chunk_queue.task_done()
+            ctx.links_queue.task_done()
 
 
 async def requeue_chunk(
@@ -174,15 +174,15 @@ async def _prepare_file_object(  # noqa
 
     if file_obj:
         return file_obj
-
-    new_filename = ctx.fs.allocate_space(filename=filename, size=total_size)
-    if new_filename:
-        await log(
-            ctx.ui,
-            f"{filename} already exists. Saving as {new_filename}.",
-            status="WARNING",
-        )
-        filename = new_filename
+    if not ctx.config.dry_run:
+        new_filename = ctx.fs.allocate_space(filename=filename, size=total_size)
+        if new_filename:
+            await log(
+                ctx.ui,
+                f"{filename} already exists. Saving as {new_filename}.",
+                status="WARNING",
+            )
+            filename = new_filename
     return File(
         meta=FileMeta(
             id=id,
@@ -208,29 +208,33 @@ async def _register_file(
         downloaded = sum(c.uploaded for c in chunks)
         if downloaded - len(chunks) > 0:
             update(ctx.ui, filename, downloaded)
-    else:
-        await ctx.file_discovery_queue.put(file_obj.meta.id)
+    await ctx.dispatch_file_queue.put((priority_index, file_obj))
 
 
 async def dispatch_chunks(ctx: HydraContext) -> None:
-    for priority_index in range(len(ctx.files)):
-        file = ctx.files[priority_index]
-        file.create_chunks()
-
-        for c in file.chunks:
-            if not ctx.is_running:
-                break
-            if c.current_pos <= c.end:
-                if ctx.stream:
-                    await ctx.chunk_queue.put((priority_index, c))
-                else:
-                    await ctx.chunk_queue.put((c, priority_index))  # type: ignore
-        ctx.current_file_id.append(priority_index)
-
-        async with ctx.condition:
+    if ctx.task_creators:
+        while not ctx.dispatch_file_queue.empty() or any(
+            not t.done() for t in ctx.task_creators
+        ):
+            priority_index, file = await ctx.dispatch_file_queue.get()
             if ctx.stream:
-                await ctx.condition.wait_for(lambda: not ctx.current_file_id)
-            else:
-                await ctx.condition.wait_for(
-                    lambda: len(ctx.current_file_id) < ctx.config.threads
-                )
+                await ctx.file_discovery_queue.put(priority_index)
+            file.create_chunks()
+            for c in file.chunks:
+                if not ctx.is_running:
+                    break
+                if c.current_pos <= c.end:
+                    if ctx.stream:
+                        await ctx.chunk_queue.put((priority_index, c))
+                    else:
+                        await ctx.chunk_queue.put((c, priority_index))  # type: ignore
+            ctx.current_file_id.append(priority_index)
+            async with ctx.condition:
+                if ctx.stream:
+                    await ctx.condition.wait_for(lambda: not ctx.current_file_id)
+                else:
+                    await ctx.condition.wait_for(
+                        lambda: len(ctx.current_file_id) < ctx.config.threads
+                    )
+        if ctx.stream:
+            await ctx.file_discovery_queue.put(-1)

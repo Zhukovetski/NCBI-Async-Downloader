@@ -53,14 +53,17 @@ async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
     await done(ctx.ui, filename)
     del ctx.files[chunk.file.meta.id]
     ctx.current_file_id.remove(chunk.file.meta.id)
-
     if not ctx.files:
         async with ctx.condition:
             ctx.condition.notify_all()
 
 
 async def get_chunk(ctx: HydraContext) -> Chunk | None:
-    _, chunk = await ctx.chunk_queue.get()
+    if ctx.stream:
+        _, chunk = await ctx.chunk_queue.get()
+    else:
+        chunk, _ = await ctx.chunk_queue.get()
+        chunk = cast(Chunk, chunk)
     file_obj = chunk.file
     if not file_obj or file_obj.is_failed:
         return None

@@ -225,6 +225,7 @@ class UIState:
     log_file: Path
     no_ui: bool = False
     quiet: bool = False
+    dry_run: bool = False
     json_logs: bool = False
     speed_limit: float | None = None
 
@@ -270,21 +271,6 @@ class UIState:
 
         self.limit_event = asyncio.Event()
         self.limit_event.set()
-
-
-@entity
-class StorageState:
-    out_dir: Path
-    ui: UIState
-    is_running: bool = True
-    files: dict[int, File] = field(default_factory=dict[int, File])
-    state_dir: Path = field(init=False)
-
-    def __post_init__(self) -> None:
-        self.out_dir = Path(self.out_dir).expanduser().resolve()
-        self.state_dir = self.out_dir / ".states"
-        self.out_dir.mkdir(parents=True, exist_ok=True)
-        self.state_dir.mkdir(parents=True, exist_ok=True)
 
 
 @entity
@@ -344,7 +330,7 @@ class HydraConfig:
     threads: int = 1
     no_ui: bool = False
     quiet: bool = False
-    out_dir: str = "download"
+    output_dir: str = "download"
     speed_limit: float | None = None
     dry_run: bool = False
     json_logs: bool = False
@@ -375,6 +361,15 @@ class HydraConfig:
             )
 
 
+def create_done_task() -> asyncio.Task[None]:
+    # Создаем Future
+    loop = asyncio.get_event_loop()
+    f = loop.create_future()
+    f.set_result(None)
+    # Принудительно приводим тип к Task[None]
+    return cast(asyncio.Task[None], f)
+
+
 @entity
 class HydraContext:
     config: HydraConfig
@@ -397,6 +392,7 @@ class HydraContext:
     links_queue: asyncio.PriorityQueue[tuple[int, str, Checksum | None]] = field(
         init=False
     )
+    dispatch_file_queue: asyncio.PriorityQueue[tuple[int, File]] = field(init=False)
     file_discovery_queue: asyncio.Queue[int] = field(init=False)
     chunk_queue: asyncio.PriorityQueue[tuple[int, Chunk] | tuple[int, Chunk]] = field(
         init=False
@@ -404,13 +400,15 @@ class HydraContext:
     stream_queue: asyncio.Queue[tuple[int, bytearray]] = field(init=False)
     condition: asyncio.Condition = field(init=False)
 
-    task_creators: list[asyncio.Task[None]] | None = None
-    dispatcher: asyncio.Task[None] | None = None
-    workers: list[asyncio.Task[None]] | None = None
-    autosave_task: asyncio.Task[None] | None = None
+    task_creators: list[asyncio.Task[None]] = field(default_factory=list)
+    workers: list[asyncio.Task[None]] = field(default_factory=list)
+
+    dispatcher: asyncio.Task[None] = field(default_factory=create_done_task)
+    autosave_task: asyncio.Task[None] = field(default_factory=create_done_task)
 
     def __post_init__(self) -> None:
         self.links_queue = asyncio.PriorityQueue()
+        self.dispatch_file_queue = asyncio.PriorityQueue()
         self.chunk_queue = asyncio.PriorityQueue()
         self.file_discovery_queue = asyncio.Queue()
         self.stream_queue = asyncio.Queue()
@@ -429,9 +427,10 @@ class HydraContext:
             is_running=self.is_running,
             no_ui=self.config.no_ui,
             quiet=self.config.quiet,
+            dry_run=self.config.dry_run,
             json_logs=self.config.json_logs,
             speed_limit=self.config.speed_limit,
-            log_file=Path(self.config.out_dir) / "download.log",
+            log_file=Path(self.config.output_dir) / "download.log",
         )
 
         self.net = NetworkState(

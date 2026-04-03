@@ -45,21 +45,21 @@ class StorageBackend(Protocol):
 
 
 class LocalStorageManager:
-    def __init__(self, out_dir: Path) -> None:
-        self.out_dir = Path(out_dir).expanduser().resolve()
-        self.state_dir = self.out_dir / ".states"
-        self.out_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, output_dir: Path) -> None:
+        self.output_dir = Path(output_dir).expanduser().resolve()
+        self.state_dir = self.output_dir / ".states"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     def allocate_space(self, filename: str, size: int) -> str | None:
-        free_space = shutil.disk_usage(self.out_dir).free
+        free_space = shutil.disk_usage(self.output_dir).free
         if free_space < size:
             raise OSError(
                 f"Insufficient disk space. "
                 f"Required: {size / (1024**2):.2f} MB,"
                 f" Available: {free_space / (1024**2):.2f} MB."
             )
-        filepath = self.out_dir / filename
+        filepath = self.output_dir / filename
 
         if filepath.is_file():
             filepath = self.get_unique_path(filepath)
@@ -72,7 +72,7 @@ class LocalStorageManager:
         return None
 
     def open_file(self, filename: str) -> int:
-        filepath = self.out_dir / filename
+        filepath = self.output_dir / filename
         return os.open(filepath, os.O_RDWR)
 
     async def write_chunk_data(
@@ -86,7 +86,7 @@ class LocalStorageManager:
             os.close(fd_or_conn)
 
     def delete_file(self, filename: str) -> None:
-        filepath = self.out_dir / filename
+        filepath = self.output_dir / filename
         filepath.unlink(missing_ok=True)
 
     def save_state(self, file_obj: File) -> None:
@@ -150,7 +150,7 @@ class LocalStorageManager:
         if not file:
             return None, len(found_states)
 
-        if (self.out_dir / file.meta.filename).is_file():
+        if (self.output_dir / file.meta.filename).is_file():
             return file, len(found_states)
 
         return None, len(found_states)
@@ -160,7 +160,7 @@ class LocalStorageManager:
 
     def verify_size(self, filename: str, expected_size: int) -> bool:
 
-        file_path = self.out_dir / filename
+        file_path = self.output_dir / filename
 
         if file_path.is_file():
             actual_size = file_path.stat().st_size
@@ -181,7 +181,7 @@ class LocalStorageManager:
             return
 
         def _compute_hash(algorithm: TypeHash) -> str:
-            filepath = self.out_dir / filename
+            filepath = self.output_dir / filename
             if not filepath.exists():
                 raise OSError(f"File: {filename} not found")
             with filepath.open("rb") as f:
@@ -192,7 +192,7 @@ class LocalStorageManager:
         calculated = await loop.run_in_executor(None, _compute_hash, algorithm)
 
         if calculated != expected_checksum:
-            filepath = self.out_dir / filename
+            filepath = self.output_dir / filename
             err_msg = (
                 f"CRITICAL: Hash mismatch for {filename}!\n"
                 f"Expected: {algorithm} "
