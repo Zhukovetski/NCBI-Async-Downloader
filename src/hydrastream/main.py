@@ -123,11 +123,11 @@ async def async_main(
     """  # noqa: E501
 
     async with HydraClient(config=config) as loader:
-        if stream:
+        if stream and not config.dry_run:
             assert sys.__stdout__ is not None
             is_terminal = sys.__stdout__.isatty()
 
-            if is_terminal and not config.dry_run:
+            if is_terminal:
                 typer.secho(
                     "Warning: You are running in --stream mode but output "
                     "is not redirected!\n"
@@ -136,7 +136,7 @@ async def async_main(
                     err=True,
                 )
 
-                if not hash:
+                if not expected_checksums:
                     typer.secho(
                         "Please use a pipe (e.g., '| zcat') or redirect to a file "
                         "(e.g., '> file.gz').\n"

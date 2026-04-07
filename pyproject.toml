@@ -81,7 +81,6 @@ dev =[
     "pytest-httpserver>=1.1.5",
     "pytest-mock>=3.15.1",
     "pytest-timeout>=2.4.0",
-    "respx>=0.22.0",       # Библиотека для мока (подмены) HTTP-ответов от httpx в тестах
     "ruff>=0.15.1",        # Ультра-быстрый линтер и форматтер на Rust (заменяет flake8, black, isort)
 ]
 
@@ -210,8 +209,8 @@ asyncio_default_fixture_loop_scope = "function"  # Каждому тесту - �
 addopts = "--cov=src --cov-report=term-missing --cov-fail-under=90"
 pythonpath = ["src"]                             # Чтобы pytest видел наши модули при импорте
 filterwarnings = [
-    "ignore:chunk_size is ignored:curl_cffi.requests.errors.CurlCffiWarning",
     "ignore:chunk_size is ignored:UserWarning",
+    "ignore:.*chunk_size is ignored.*",
 ]
 # ==============================================================================
 # НАСТРОЙКИ БЕЗОПАСНОСТИ (BANDIT)

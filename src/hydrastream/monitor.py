@@ -225,6 +225,7 @@ def add_file(ctx: UIState, filename: str, total_size: int | None = None) -> None
 
 
 def update(ctx: UIState, filename: str, advance_bytes: int) -> None:
+
     ctx.buffer[filename] += advance_bytes
     ctx.download_bytes += advance_bytes
 

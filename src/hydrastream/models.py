@@ -345,7 +345,7 @@ class HydraConfig:
 
     MIN_CHUNK: int = field(init=False)  # 1MB
     STREAM_CHUNK_SIZE: int = field(init=False)  # 5MB
-    STREAM_BUFFER_SIZE: int | None = None
+    STREAM_BUFFER_SIZE: int = field(init=False)
 
     def __post_init__(
         self,
@@ -353,13 +353,17 @@ class HydraConfig:
         min_stream_chunk_size_mb: int,
         stream_buffer_size_mb: int | None,
     ) -> None:
-        object.__setattr__(self, "MIN_CHUNK", min_chunk_size_mb * 1024 * 1024)
+        object.__setattr__(self, "MIN_CHUNK", min_chunk_size_mb * 1024**2)
         object.__setattr__(
-            self, "STREAM_CHUNK_SIZE", min_stream_chunk_size_mb * 1024 * 1024
+            self, "STREAM_CHUNK_SIZE", min_stream_chunk_size_mb * 1024**2
         )
         if stream_buffer_size_mb:
             object.__setattr__(
-                self, "STREAM_BUFFER_SIZE", stream_buffer_size_mb * 1024 * 1024
+                self, "STREAM_BUFFER_SIZE", stream_buffer_size_mb * 1024**2
+            )
+        else:
+            object.__setattr__(
+                self, "STREAM_BUFFER_SIZE", self.STREAM_CHUNK_SIZE * self.threads * 2
             )
 
 
@@ -374,9 +378,9 @@ def create_done_task() -> asyncio.Task[None]:
 class HydraContext:
     config: HydraConfig
 
-    is_running: bool = True
+    is_stoping: bool = False
     stream: bool = False
-    current_file_id: list[int] = field(default_factory=list[int])
+    current_files_id: set[int] = field(default_factory=set[int])
     next_offset: int = 0
     active_downloads: int = 0
 
@@ -399,7 +403,10 @@ class HydraContext:
         init=False
     )
     stream_queue: asyncio.Queue[tuple[int, bytearray]] = field(init=False)
-    condition: asyncio.Condition = field(init=False)
+
+    current_files_cond: asyncio.Condition = field(default_factory=asyncio.Condition)
+    chunk_from_future_cond: asyncio.Condition = field(default_factory=asyncio.Condition)
+    all_complete_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     task_creators: list[asyncio.Task[None]] = field(default_factory=list)
     workers: list[asyncio.Task[None]] = field(default_factory=list)
@@ -413,7 +420,6 @@ class HydraContext:
         self.chunk_queue = asyncio.PriorityQueue()
         self.file_discovery_queue = asyncio.Queue()
         self.stream_queue = asyncio.Queue()
-        self.condition = asyncio.Condition()
 
         maxsize = (
             self.config.STREAM_BUFFER_SIZE // self.config.MIN_CHUNK
@@ -425,7 +431,7 @@ class HydraContext:
         )
         self.heap_size = maxsize
         self.ui = UIState(
-            is_running=self.is_running,
+            is_running=not self.is_stoping,
             no_ui=self.config.no_ui,
             quiet=self.config.quiet,
             dry_run=self.config.dry_run,

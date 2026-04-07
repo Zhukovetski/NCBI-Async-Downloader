@@ -8,6 +8,7 @@ import heapq
 import math
 import random
 import signal
+import sys
 from _hashlib import HASH
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
@@ -34,7 +35,7 @@ async def delayed_task(
 
 async def autosave(ctx: HydraContext, interval: float) -> None:
     loop = asyncio.get_running_loop()
-    while ctx.is_running:
+    while True:
         try:
             await asyncio.sleep(interval)
             await loop.run_in_executor(None, save_all_states, ctx, ctx.files)
@@ -63,10 +64,10 @@ async def cancel_tasks(ctx: HydraContext) -> None:
 
 
 async def stop(ctx: HydraContext, complete: bool = False) -> None:
-    if not ctx.is_running:
+    if ctx.is_stoping:
         return
 
-    ctx.is_running = False
+    ctx.is_stoping = True
 
     if not complete:
         await log(
@@ -80,15 +81,13 @@ async def stop(ctx: HydraContext, complete: bool = False) -> None:
         with contextlib.suppress(asyncio.QueueFull):
             ctx.stream_queue.put_nowait((-1, bytearray()))
             ctx.file_discovery_queue.put_nowait(-1)
-
-    async with ctx.condition:
-        ctx.condition.notify_all()
+    else:
+        ctx.all_complete_event.set()
 
 
 async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) -> None:
-    """Универсальная глушилка завода. Защищает от копипасты."""
     if (
-        ctx.is_running
+        not ctx.is_stoping
         and ctx.ui.total_files > 0
         and ctx.ui.total_files == ctx.ui.files_completed
     ):
@@ -117,7 +116,8 @@ async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) ->
         save_all_states(ctx, ctx.files)
 
         for file_obj in ctx.files.values():
-            ctx.fs.close_file(file_obj.fd)
+            if file_obj.fd:
+                ctx.fs.close_file(file_obj.fd)
     await ui_stop(ctx.ui)
 
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -135,15 +135,9 @@ async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[bytes]:
     await log(ctx.ui, f"Streaming: {file_obj.meta.filename}", status="INFO")
     try:
         while ctx.next_offset < total_size:
-            if not ctx.is_running:
-                break
-
             if ctx.heap and ctx.heap[0][0] == ctx.next_offset:
                 _, chunk_data = heapq.heappop(ctx.heap)
                 chunk_bytes = bytes(chunk_data)
-
-                async with ctx.condition:
-                    ctx.condition.notify_all()
 
                 if hasher:
                     hasher.update(chunk_bytes)
@@ -152,6 +146,10 @@ async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[bytes]:
 
                 length = len(chunk_bytes)
                 ctx.next_offset += length
+
+                async with ctx.chunk_from_future_cond:
+                    ctx.chunk_from_future_cond.notify_all()
+
                 continue
 
             chunk_start, chunk_data = await ctx.stream_queue.get()
@@ -168,6 +166,8 @@ async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[bytes]:
 
                 length = len(chunk_bytes)
                 ctx.next_offset += length
+                async with ctx.chunk_from_future_cond:
+                    ctx.chunk_from_future_cond.notify_all()
 
             else:
                 heapq.heappush(ctx.heap, (chunk_start, chunk_data))
@@ -185,15 +185,22 @@ async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[bytes]:
     finally:
         ctx.heap.clear()
         del ctx.files[file_id]
-        ctx.current_file_id.remove(file_id)
-        async with ctx.condition:
-            ctx.condition.notify_all()
+        ctx.current_files_id.remove(file_id)
+        async with ctx.current_files_cond:
+            ctx.current_files_cond.notify()
+        if ctx.stream and not ctx.files:
+            await ctx.file_discovery_queue.put(-1)
 
 
 async def create_tasks(
     ctx: HydraContext,
     links: list[str],
+    loop: asyncio.AbstractEventLoop,
 ) -> None:
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(stop(ctx)))
+
     num_task_creator = math.ceil(len(links) ** 0.4) if len(links) > 1 else 1
     num_task_creator = min(num_task_creator, 20)
     ctx.task_creators = [
@@ -217,31 +224,24 @@ async def create_tasks(
             autosave(ctx, interval=60), name="Autosaver"
         )
     if ctx.config.dry_run:
-        if ctx.task_creators:
-            for task in ctx.task_creators:
-                await task
-        await print_dry_run_report(ctx.ui, ctx.files, ctx.stream, ctx.config.output_dir)
-        ctx.files.clear()
-    else:
-        ctx.dispatcher = asyncio.create_task(dispatch_chunks(ctx), name="Dispather")
-        ctx.workers = [
-            asyncio.create_task(
-                delayed_task(ctx, download_worker),
-                name=f"Worker: {i}",
-            )
-            for i in range(num_workers)
-        ]
+        return
+
+    ctx.workers = [
+        asyncio.create_task(
+            delayed_task(ctx, download_worker),
+            name=f"Worker: {i}",
+        )
+        for i in range(num_workers)
+    ]
+
+    ctx.dispatcher = asyncio.create_task(dispatch_chunks(ctx), name="Dispather")
 
 
 async def dispatch_links(
     ctx: HydraContext,
     links: str | Iterable[str],
     expected_checksums: dict[str, tuple[TypeHash, str]] | None,
-    loop: asyncio.AbstractEventLoop,
 ) -> None:
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(stop(ctx)))
 
     checksums = None
     for i, link in enumerate(links):
@@ -252,6 +252,9 @@ async def dispatch_links(
             expected_checksums = None
         await ctx.links_queue.put((i, link, checksums))
 
+    for _ in range(len(ctx.task_creators)):
+        await ctx.links_queue.put((sys.maxsize, "", None))
+
 
 async def stream_all(
     ctx: HydraContext,
@@ -261,18 +264,18 @@ async def stream_all(
 
     await ui_start(ctx.ui)
 
-    ctx.stream = True
-
     loop = asyncio.get_running_loop()
+
+    ctx.stream = True
 
     links = [links] if isinstance(links, str) else list(links)
 
-    await dispatch_links(ctx, links, expected_checksums, loop)
+    await create_tasks(ctx, links, loop)
 
-    await create_tasks(ctx, links)
+    await dispatch_links(ctx, links, expected_checksums)
 
     try:
-        while (not ctx.dispatcher.done() or ctx.files) and ctx.is_running:
+        while True:
             file_id = await ctx.file_discovery_queue.get()
             if file_id == -1:
                 break
@@ -308,22 +311,26 @@ async def run_downloads(
 
     await ui_start(ctx.ui)
 
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(stop(ctx)))
+
     ctx.stream = False
 
     links = [links] if isinstance(links, str) else list(links)
 
-    await dispatch_links(ctx, links, expected_checksums, loop)
+    await create_tasks(ctx, links, loop)
 
-    await create_tasks(ctx, links)
+    await dispatch_links(ctx, links, expected_checksums)
+
+    if ctx.config.dry_run and ctx.task_creators:
+        for task in ctx.task_creators:
+            await task
+
+        await print_dry_run_report(ctx.ui, ctx.files, ctx.stream, ctx.config.output_dir)
+        ctx.all_complete_event.set()
 
     try:
-        async with ctx.condition:
-            await ctx.condition.wait_for(
-                lambda: (
-                    not ((not ctx.dispatcher.done() or ctx.files) and ctx.is_running)
-                )
-            )
-
+        await ctx.all_complete_event.wait()
     except asyncio.CancelledError:
         pass
 

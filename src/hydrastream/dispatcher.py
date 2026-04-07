@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import os
 import random
+import sys
 from typing import cast
 
 from curl_cffi import Response
@@ -25,7 +26,6 @@ async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
         if chunk.file.meta.content_length:
             if chunk.file.verified or not chunk.file.is_complete:
                 return
-
             chunk.file.verified = True
             if not ctx.fs.verify_size(filename, file_obj.meta.content_length):
                 return
@@ -55,9 +55,11 @@ async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
     ctx.fs.delete_state(filename)
     await done(ctx.ui, filename)
     del ctx.files[chunk.file.meta.id]
-    ctx.current_file_id.remove(chunk.file.meta.id)
-    async with ctx.condition:
-        ctx.condition.notify_all()
+    ctx.current_files_id.remove(chunk.file.meta.id)
+    async with ctx.current_files_cond:
+        ctx.current_files_cond.notify()
+    if not ctx.files:
+        ctx.all_complete_event.set()
 
 
 async def get_chunk(ctx: HydraContext) -> Chunk | None:
@@ -66,27 +68,24 @@ async def get_chunk(ctx: HydraContext) -> Chunk | None:
     else:
         chunk, _ = await ctx.chunk_queue.get()
         chunk = cast(Chunk, chunk)
+    if _ == sys.maxsize:
+        raise asyncio.CancelledError
     file_obj = chunk.file
     if not file_obj or file_obj.is_failed:
         return None
 
     if ctx.stream:
-        max_ahead_bytes = ctx.heap_size * ctx.config.STREAM_CHUNK_SIZE
-
-        # Если чанк из "слишком далекого будущего" - ждем!
-        if chunk.current_pos > ctx.next_offset + max_ahead_bytes:
-            async with ctx.condition:
-                await ctx.condition.wait_for(
-                    lambda: (
-                        (chunk.current_pos <= ctx.next_offset + max_ahead_bytes)
-                        or not ctx.is_running
-                    )
+        async with ctx.chunk_from_future_cond:
+            await ctx.chunk_from_future_cond.wait_for(
+                lambda: (
+                    ctx.next_offset + ctx.config.STREAM_BUFFER_SIZE >= chunk.current_pos
                 )
+            )
     return chunk
 
 
 async def download_worker(ctx: HydraContext) -> None:
-    while ctx.is_running:
+    while True:
         try:
             while ctx.active_downloads >= ctx.net.rate_limiter.current_rps:
                 await asyncio.sleep(0.1)
@@ -141,7 +140,7 @@ async def requeue_chunk(
     chunk: Chunk | None,
     delay_range: tuple[float, float] = (1.0, 3.0),
 ) -> None:
-    if not (ctx.is_running and chunk):
+    if not chunk:
         return
 
     file_obj = chunk.file

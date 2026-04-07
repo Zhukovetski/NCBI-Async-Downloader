@@ -203,8 +203,6 @@ class LocalStorageManager:
             raise ValueError(err_msg)
 
     def get_unique_path(self, file_path: Path) -> Path:
-        if not file_path.is_file():
-            return file_path
 
         stem = file_path.stem
         suffix = file_path.suffix

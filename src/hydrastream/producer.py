@@ -3,6 +3,7 @@
 
 import asyncio
 import random
+import sys
 
 from curl_cffi import Headers, Response
 from curl_cffi.requests import RequestsError
@@ -17,11 +18,10 @@ async def chunk_producer(  # noqa
     ctx: HydraContext,
 ) -> None:
 
-    while not ctx.links_queue.empty():
+    while True:
         try:
             id, url, checksum = await ctx.links_queue.get()
-
-            if not ctx.is_running:
+            if id == sys.maxsize:
                 break
 
             meta = await _fetch_metadata(ctx, url)
@@ -64,32 +64,34 @@ async def chunk_producer(  # noqa
 
                 # Остальные ошибки сервера (5xx, 429) — пробуем перекинуть ссылку
                 # в очередь
-                await requeue_chunk(ctx, url, checksum, delay_range=(0.5, 2.0))
+                await requeue_chunk(ctx, id, url, checksum, delay_range=(0.5, 2.0))
             # 2. Если ответа нет (Сетевая ошибка / CurlError / Timeout)
             else:
-                await requeue_chunk(ctx, url, checksum)
+                await requeue_chunk(ctx, id, url, checksum)
 
         except TimeoutError:
-            await requeue_chunk(ctx, url, checksum)
+            await requeue_chunk(ctx, id, url, checksum)
         except OSError as e:
             await log(ctx.ui, f"OS/Disk Error: {e}", status="CRITICAL")
-            ctx.is_running = False
-            break
+            raise
         except Exception as e:
             await log(
                 ctx.ui, f"Critical Task creator Exception: {e!r}", status="CRITICAL"
             )
             raise
 
+    await ctx.dispatch_file_queue.put((sys.maxsize, file_obj))
+
 
 async def requeue_chunk(
     ctx: HydraContext,
+    id: int,
     url: str,
     checksum: Checksum | None,
     delay_range: tuple[float, float] = (1.0, 3.0),
 ) -> None:
 
-    await ctx.links_queue.put((-1, url, checksum))
+    await ctx.links_queue.put((id, url, checksum))
     delay = random.uniform(*delay_range)
     await asyncio.sleep(delay)
 
@@ -109,6 +111,7 @@ async def _fetch_metadata(ctx: HydraContext, url: str) -> tuple[str, int, bool]:
 
 def parse_headers(url: str, headers: Headers) -> tuple[str, int, bool]:
     total_size = int(headers.get("content-length", 0))
+
     accept_ranges = headers.get("accept-ranges", "").lower()
     supports_ranges = (accept_ranges == "bytes") and (total_size > 0)
     filename = extract_filename(url, headers)
@@ -210,31 +213,31 @@ async def _register_file(
 
 
 async def dispatch_chunks(ctx: HydraContext) -> None:
-    if ctx.task_creators:
-        while not ctx.dispatch_file_queue.empty() or any(
-            not t.done() for t in ctx.task_creators
-        ):
-            priority_index, file = await ctx.dispatch_file_queue.get()
-            if ctx.stream:
-                await ctx.file_discovery_queue.put(priority_index)
-            file.create_chunks()
-            for c in file.chunks:
-                if not ctx.is_running:
-                    break
-                if c.current_pos <= c.end:
-                    if ctx.stream:
-                        await ctx.chunk_queue.put((priority_index, c))
-                    else:
-                        await ctx.chunk_queue.put((c, priority_index))  # type: ignore
-            ctx.current_file_id.append(priority_index)
-            async with ctx.condition:
-                if ctx.stream:
-                    await ctx.condition.wait_for(lambda: not ctx.current_file_id)
-                else:
-                    await ctx.condition.wait_for(
-                        lambda: len(ctx.current_file_id) < ctx.config.threads
-                    )
+    while True:
+        priority_index, file = await ctx.dispatch_file_queue.get()
+        if priority_index == sys.maxsize:
+            break
         if ctx.stream:
-            await ctx.file_discovery_queue.put(-1)
-        async with ctx.condition:
-            ctx.condition.notify_all()
+            await ctx.file_discovery_queue.put(priority_index)
+        file.create_chunks()
+        for c in file.chunks:
+            if c.current_pos <= c.end:
+                if ctx.stream:
+                    await ctx.chunk_queue.put((priority_index, c))
+                else:
+                    await ctx.chunk_queue.put((c, priority_index))  # type: ignore
+        ctx.current_files_id.add(priority_index)
+
+        async with ctx.current_files_cond:
+            if ctx.stream:
+                await ctx.current_files_cond.wait_for(lambda: not ctx.current_files_id)
+            else:
+                await ctx.current_files_cond.wait_for(
+                    lambda: len(ctx.current_files_id) < ctx.config.threads
+                )
+
+    for _ in range(len(ctx.workers)):
+        if ctx.stream:
+            await ctx.chunk_queue.put((sys.maxsize, c))
+        else:
+            await ctx.chunk_queue.put((c, sys.maxsize))  # type: ignore
