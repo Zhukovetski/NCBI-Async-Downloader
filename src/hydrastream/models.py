@@ -234,9 +234,15 @@ class UIState:
 
     is_running: bool = True
     console: Console = Console(stderr=True)
-    limit_event: asyncio.Event = field(init=False)
-    frequency_speed_limit: int = 100
+    frequency_speed_limit: int = 10
     time_speed_limit: float = field(init=False)
+    bytes_to_check: int = field(init=False)
+    prev_bytes: int = 0
+    last_checkpoint_time: float = 0.0
+    target_time: float = field(init=False)
+
+    limit_event: asyncio.Event = field(default_factory=asyncio.Event)
+    checkpoint_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     has_hash: int = 0
     ranges: int = 0
@@ -270,12 +276,15 @@ class UIState:
 
     def __post_init__(self) -> None:
         self.renewal_rate = 1 / self.refresh_per_second
+        self.time_speed_limit = 1 / self.frequency_speed_limit
 
         if self.speed_limit:
-            self.speed_limit = (self.speed_limit / self.frequency_speed_limit) * 1024**2
-            self.time_speed_limit = 1 / self.frequency_speed_limit
+            self.speed_limit = self.speed_limit * 1024**2
+            self.bytes_to_check = int(self.speed_limit / self.frequency_speed_limit)
+            self.target_time = self.bytes_to_check / self.speed_limit
+        else:
+            self.bytes_to_check = 5 * 1024**2
 
-        self.limit_event = asyncio.Event()
         self.limit_event.set()
 
 
@@ -296,7 +305,7 @@ class AMIDState:
     circuit_broken_until: float = 0.0
 
     def __post_init__(self) -> None:
-        self.current_rps: int = int(self.max_rps**0.5)
+        self.current_rps: int = self.max_rps
         self.limiter = AsyncLimiter(self.current_rps, 1)
 
 
@@ -381,14 +390,13 @@ class HydraContext:
     is_stoping: bool = False
     stream: bool = False
     current_files_id: set[int] = field(default_factory=set[int])
+    active_stream: set[Response] = field(default_factory=set[Response])
     next_offset: int = 0
-    active_downloads: int = 0
+    dynamic_limit: int = 1
 
     net: NetworkState = field(init=False)
     ui: UIState = field(init=False)
     fs: StorageBackend
-
-    heap_size: int = field(init=False)
 
     files: dict[int, File] = field(default_factory=dict[int, File])
     heap: list[tuple[int, bytearray]] = field(
@@ -406,6 +414,7 @@ class HydraContext:
 
     current_files_cond: asyncio.Condition = field(default_factory=asyncio.Condition)
     chunk_from_future_cond: asyncio.Condition = field(default_factory=asyncio.Condition)
+    dynamic_limit_cond: asyncio.Condition = field(default_factory=asyncio.Condition)
     all_complete_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     task_creators: list[asyncio.Task[None]] = field(default_factory=list)
@@ -413,6 +422,7 @@ class HydraContext:
 
     dispatcher: asyncio.Task[None] = field(default_factory=create_done_task)
     autosave_task: asyncio.Task[None] = field(default_factory=create_done_task)
+    telemetry_task: asyncio.Task[None] = field(default_factory=create_done_task)
 
     def __post_init__(self) -> None:
         self.links_queue = asyncio.PriorityQueue()
@@ -421,15 +431,6 @@ class HydraContext:
         self.file_discovery_queue = asyncio.Queue()
         self.stream_queue = asyncio.Queue()
 
-        maxsize = (
-            self.config.STREAM_BUFFER_SIZE // self.config.MIN_CHUNK
-            if self.config.STREAM_BUFFER_SIZE
-            else 0
-        )
-        maxsize = (
-            maxsize if maxsize > self.config.threads * 2 else self.config.threads * 2
-        )
-        self.heap_size = maxsize
         self.ui = UIState(
             is_running=not self.is_stoping,
             no_ui=self.config.no_ui,

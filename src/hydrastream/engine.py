@@ -14,7 +14,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from typing import TypeVarTuple, Unpack
 
-from .dispatcher import download_worker
+from .dispatcher import download_worker, telemetry_worker
 from .models import Checksum, File, HydraContext, TypeHash
 from .monitor import done, log, print_dry_run_report, ui_start, ui_stop
 from .network import close
@@ -225,10 +225,10 @@ async def create_tasks(
         )
     if ctx.config.dry_run:
         return
-
+    ctx.telemetry_task = asyncio.create_task(telemetry_worker(ctx), name="Telemetry")
     ctx.workers = [
         asyncio.create_task(
-            delayed_task(ctx, download_worker),
+            delayed_task(ctx, download_worker, i),
             name=f"Worker: {i}",
         )
         for i in range(num_workers)
@@ -310,9 +310,6 @@ async def run_downloads(
     loop.set_default_executor(custom_pool)
 
     await ui_start(ctx.ui)
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(stop(ctx)))
 
     ctx.stream = False
 

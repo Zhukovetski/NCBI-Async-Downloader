@@ -3,17 +3,122 @@
 
 import asyncio
 import contextlib
+import math
 import os
 import random
 import sys
+import time
 from typing import cast
 
-from curl_cffi import Response
+from curl_cffi import CurlOpt, Response
 from curl_cffi.requests import RequestsError
 
 from .models import Chunk, HydraContext
 from .monitor import done, log, update
 from .network import stream_chunk, try_scale_up
+
+
+async def telemetry_worker(ctx: HydraContext) -> None:
+    """Фоновый инспектор. Управляет скоростью и Авто-тюнингом воркеров."""
+
+    ctx.ui.last_checkpoint_time = time.monotonic()
+    smoothed_speed = 0.0
+    prev_speed = 0.0
+    current_limit = 2
+
+    # Безопасные границы для адаптивного окна
+    TAU = 2.0
+    MIN_WINDOW = 1024  # 1 КБ (чтобы не сжечь CPU)
+
+    while True:  # Проверяем глобальный флаг
+        # 1. Ждем пульса от Монитора
+        await ctx.ui.checkpoint_event.wait()
+        ctx.ui.checkpoint_event.clear()
+
+        now = time.monotonic()
+        elapsed = min(1, now - ctx.ui.last_checkpoint_time)
+
+        if elapsed <= 0:
+            continue  # Защита от деления на ноль при сверхбыстрых всплесках
+
+        # =========================================================
+        # ФАЗА 1: ЛОГИКА ОГРАНИЧИТЕЛЯ СКОРОСТИ (Global Valve)
+        # =========================================================
+        if ctx.ui.speed_limit:
+            target_time = ctx.ui.bytes_to_check / ctx.ui.speed_limit
+
+            if elapsed < target_time:
+                sleep_duration = target_time - elapsed
+
+                # ЗАКРЫВАЕМ ВЕНТИЛЬ
+                for r in ctx.active_stream:
+                    if r.curl is not None:
+                        r.curl.setopt(CurlOpt.MAX_RECV_SPEED_LARGE, 1)
+                await asyncio.sleep(sleep_duration)
+                # ОТКРЫВАЕМ ВЕНТИЛЬ
+                for r in ctx.active_stream:
+                    if r.curl is not None:
+                        r.curl.setopt(CurlOpt.MAX_RECV_SPEED_LARGE, 0)
+                # Важно: мы спали! Нужно пересчитать 'now' и 'elapsed'
+                # для Авто-тюнера, чтобы он считал РЕАЛЬНУЮ скорость с учетом паузы.
+                now = time.monotonic()
+                elapsed = now - ctx.ui.last_checkpoint_time
+
+                continue
+
+        # =========================================================
+        # ФАЗА 2: АВТО-ТЮНЕР (AIMD Hill Climbing)
+        # =========================================================
+        speed_now = ctx.ui.bytes_to_check / elapsed
+
+        if smoothed_speed == 0.0:
+            smoothed_speed = speed_now
+        else:
+            # Магия: вычисляем вес нового замера на основе физического времени
+            alpha = 1.0 - math.exp(-elapsed / TAU)
+            smoothed_speed = (alpha * speed_now) + ((1.0 - alpha) * smoothed_speed)
+
+        coef = 1 / speed_now**0.2
+        # Пересчитываем, когда мы хотим проснуться в следующий раз
+        new_bytes_to_check = int(ctx.ui.bytes_to_check * (1 - coef + elapsed))
+
+        ctx.ui.bytes_to_check = max(MIN_WINDOW, new_bytes_to_check)
+        # Анализируем результат нашего предыдущего шага
+        if smoothed_speed > prev_speed * 1.05:
+            prev_speed = smoothed_speed
+            # Скорость выросла! Добавляем воркеров (если не уперлись в лимит юзера)
+            if current_limit < ctx.config.threads:
+                current_limit += 1
+                await log(
+                    ctx.ui,
+                    f"Speed increased to {speed_now / 1024**2:.1f} MB/s. Scaling up to {current_limit} workers.",
+                    status="INFO",
+                    throttle_key="scale_up",
+                    throttle_sec=5.0,
+                )
+
+        elif smoothed_speed < prev_speed * 0.95:
+            prev_speed = smoothed_speed
+            # Скорость резко упала (сеть забилась). Скидываем воркеров.
+            if current_limit > 2:
+                current_limit -= 1
+                await log(
+                    ctx.ui,
+                    f"Network congested. Scaling down to {current_limit} workers.",
+                    status="WARNING",
+                    throttle_key="scale_down",
+                    throttle_sec=5.0,
+                )
+
+        # Применяем лимит
+        if ctx.dynamic_limit != current_limit:
+            ctx.dynamic_limit = current_limit
+            # Будим диспетчера только если лимит изменился
+            async with ctx.dynamic_limit_cond:
+                ctx.dynamic_limit_cond.notify_all()
+
+        # Фиксируем время для следующего круга
+        ctx.ui.last_checkpoint_time = time.monotonic()
 
 
 async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
@@ -84,60 +189,71 @@ async def get_chunk(ctx: HydraContext) -> Chunk | None:
     return chunk
 
 
-async def download_worker(ctx: HydraContext) -> None:
+async def download_worker(ctx: HydraContext, worker_id: int) -> None:
     while True:
         try:
-            while ctx.active_downloads >= ctx.net.rate_limiter.current_rps:
-                await asyncio.sleep(0.1)
-            ctx.active_downloads += 1
+            if worker_id >= ctx.dynamic_limit:
+                async with ctx.dynamic_limit_cond:
+                    await ctx.dynamic_limit_cond.wait_for(
+                        lambda: worker_id < ctx.dynamic_limit
+                    )
             chunk = None
 
             chunk = await get_chunk(ctx)
             if chunk is None:
                 continue
-            await process_chunk(ctx, chunk)
+            await process_chunk(ctx, chunk, worker_id)
             await file_done(ctx, chunk)
+
+        except ValueError:
+            if chunk:
+                await ctx.chunk_queue.put((-1, chunk))
+
         except asyncio.CancelledError:
             break
 
         except RequestsError as e:
-            response = e.response  # type: ignore
+            if chunk:
+                response = e.response  # type: ignore
 
-            if isinstance(response, Response):
-                # Теперь Pyright ВИДИТ, что это Response, и даст автодополнение
-                status = response.status_code
+                if isinstance(response, Response):
+                    # Теперь Pyright ВИДИТ, что это Response, и даст автодополнение
+                    status = response.status_code
 
-                if chunk and status in {400, 401, 403, 404, 410, 416}:
-                    await log(
-                        ctx.ui,
-                        f"Chunk for {chunk.file.meta.filename} failed permanently "
-                        f"(HTTP {status}).",
-                        status="ERROR",
-                    )
-                    chunk.file.is_failed = True
-                    ctx.fs.delete_file(chunk.file.meta.filename)
+                    if status in {400, 401, 403, 404, 410, 416}:
+                        await log(
+                            ctx.ui,
+                            f"Chunk for {chunk.file.meta.filename} failed permanently "
+                            f"(HTTP {status}).",
+                            status="ERROR",
+                        )
+                        chunk.file.is_failed = True
+                        ctx.fs.delete_file(chunk.file.meta.filename)
 
-                # Остальные ошибки сервера (5xx, 429) — пробуем перекинуть чанк
-                # в очередь
+                    # Остальные ошибки сервера (5xx, 429) — пробуем перекинуть чанк
+                    # в очередь
+                    else:
+                        await requeue_chunk(ctx, chunk, delay_range=(0.5, 2.0))
+                # 2. Если ответа нет (Сетевая ошибка / CurlError / Timeout)
                 else:
-                    await requeue_chunk(ctx, chunk, delay_range=(0.5, 2.0))
-            # 2. Если ответа нет (Сетевая ошибка / CurlError / Timeout)
-            else:
-                await requeue_chunk(ctx, chunk)
+                    await requeue_chunk(ctx, chunk)
+
+            ctx.dynamic_limit = max(ctx.dynamic_limit - 1, 1)
+            async with ctx.dynamic_limit_cond:
+                ctx.dynamic_limit_cond.notify_all()
 
         except TimeoutError:
-            await requeue_chunk(ctx, chunk)
+            if chunk:
+                await requeue_chunk(ctx, chunk)
 
         except Exception as e:
             await log(ctx.ui, f"Critical Worker Exception: {e!r}", status="CRITICAL")
             raise
-        finally:
-            ctx.active_downloads -= 1
 
 
 async def requeue_chunk(
     ctx: HydraContext,
-    chunk: Chunk | None,
+    chunk: Chunk,
     delay_range: tuple[float, float] = (1.0, 3.0),
 ) -> None:
     if not chunk:
@@ -188,7 +304,7 @@ async def requeue_chunk(
 
 
 async def disk_process_chunk(
-    ctx: HydraContext, chunk: Chunk, headers: dict[str, str] | None
+    ctx: HydraContext, chunk: Chunk, headers: dict[str, str] | None, worker_id: int
 ) -> None:
     buffer = bytearray()
     fd = chunk.file.fd
@@ -200,27 +316,30 @@ async def disk_process_chunk(
         chunk.file.meta.url,
         headers=headers,
     ) as r:
+        ctx.active_stream.add(r)
         try:
             async for data in r.aiter_content(chunk_size=131072):  # type: ignore
                 data = cast(bytes, data)
                 buffer.extend(data)
                 update(ctx.ui, chunk.file.meta.filename, len(data))
-                await ctx.ui.limit_event.wait()
                 if len(buffer) >= buffer_size:
                     await ctx.fs.write_chunk_data(fd, buffer, chunk.current_pos)
                     chunk.current_pos += len(buffer)
                     buffer = bytearray()
                     if random.random() < 0.1:
                         await try_scale_up(ctx.net.rate_limiter)
+                if ctx.dynamic_limit <= worker_id:
+                    raise ValueError
 
         finally:
+            ctx.active_stream.remove(r)
             if buffer:
                 await ctx.fs.write_chunk_data(fd, buffer, chunk.current_pos)
                 chunk.current_pos += len(buffer)
 
 
 async def stream_process_chunk(
-    ctx: HydraContext, chunk: Chunk, headers: dict[str, str] | None
+    ctx: HydraContext, chunk: Chunk, headers: dict[str, str] | None, worker_id: int
 ) -> None:
     buffer = bytearray()
     async with stream_chunk(
@@ -228,16 +347,18 @@ async def stream_process_chunk(
         chunk.file.meta.url,
         headers=headers,
     ) as r:
+        ctx.active_stream.add(r)
         try:
             async for data in r.aiter_content(chunk_size=131072):  # type: ignore
                 data = cast(bytes, data)
                 buffer.extend(data)
                 update(ctx.ui, chunk.file.meta.filename, len(data))
-                await ctx.ui.limit_event.wait()
                 if len(buffer) > ctx.config.STREAM_CHUNK_SIZE:
                     await ctx.stream_queue.put((chunk.current_pos, buffer))
                     chunk.current_pos = chunk.current_pos + len(buffer)
                     buffer = bytearray()
+                if ctx.dynamic_limit <= worker_id:
+                    raise ValueError
             await ctx.stream_queue.put((chunk.current_pos, buffer))
             chunk.current_pos = chunk.current_pos + len(buffer)
             buffer = bytearray()
@@ -249,9 +370,11 @@ async def stream_process_chunk(
                     ctx.stream_queue.put_nowait((chunk.current_pos, buffer))
                     chunk.current_pos = chunk.current_pos + len(buffer)
             raise
+        finally:
+            ctx.active_stream.remove(r)
 
 
-async def process_chunk(ctx: HydraContext, chunk: Chunk) -> None:
+async def process_chunk(ctx: HydraContext, chunk: Chunk, worker_id: int) -> None:
     if chunk.current_pos > chunk.end:
         return
     if chunk.file.meta.supports_ranges:
@@ -259,6 +382,6 @@ async def process_chunk(ctx: HydraContext, chunk: Chunk) -> None:
     else:
         headers = None
     if not ctx.stream:
-        await disk_process_chunk(ctx, chunk, headers)
+        await disk_process_chunk(ctx, chunk, headers, worker_id)
     else:
-        await stream_process_chunk(ctx, chunk, headers)
+        await stream_process_chunk(ctx, chunk, headers, worker_id)

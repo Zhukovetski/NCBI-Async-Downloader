@@ -28,6 +28,8 @@ async def report_429(
     async with ctx.lock:
         if e503:
             ctx.current_rps = max(1, ctx.current_rps - 1)
+            ctx.limiter = AsyncLimiter(ctx.current_rps, 1)
+
             return
 
         now = time.time()
@@ -51,6 +53,7 @@ async def report_429(
         if new_rps < ctx.current_rps:
             ctx.current_rps = new_rps
             ctx.limiter = AsyncLimiter(new_rps, 1)
+
             await log(
                 ctx.monitor,
                 f"429 detected. Throttling to {new_rps} RPS",
@@ -68,6 +71,7 @@ async def try_scale_up(ctx: AMIDState) -> bool:
 
         ctx.current_rps += 1
         ctx.limiter = AsyncLimiter(ctx.current_rps, 1)
+
         return True
 
 

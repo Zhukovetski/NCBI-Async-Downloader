@@ -229,6 +229,11 @@ def update(ctx: UIState, filename: str, advance_bytes: int) -> None:
     ctx.buffer[filename] += advance_bytes
     ctx.download_bytes += advance_bytes
 
+    if ctx.download_bytes - ctx.prev_bytes >= ctx.bytes_to_check:
+        ctx.prev_bytes += ctx.bytes_to_check
+
+        ctx.checkpoint_event.set()
+
 
 async def refresh_loop(ctx: UIState) -> None:
     if ctx.progress:
