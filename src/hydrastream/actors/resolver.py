@@ -19,6 +19,7 @@ from hydrastream.utils import redact_url
 async def metadata_resolver(  # noqa
     ctx: HydraContext,
 ) -> None:
+    id, url, checksum = None, None, None
     while True:
         try:
             id, url, checksum = await ctx.queues.links.get()
@@ -53,7 +54,7 @@ async def metadata_resolver(  # noqa
             break
 
         except RequestsError as e:
-            response = e.response  # type: ignore
+            response = e.response
 
             if isinstance(response, Response):
                 status = response.status_code
@@ -94,11 +95,13 @@ async def metadata_resolver(  # noqa
 
 async def requeue_chunk(
     ctx: HydraContext,
-    id: int,
-    url: str,
+    id: int | None,
+    url: str | None,
     checksum: Checksum | None,
     delay_range: tuple[float, float] = (1.0, 3.0),
 ) -> None:
+    if id is None or url is None:
+        return
     await ctx.queues.links.put((id, url, checksum))
     delay = random.uniform(*delay_range)
     await asyncio.sleep(delay)

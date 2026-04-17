@@ -21,6 +21,6 @@ downloaded_files/
 download/
 musor/
 
-
+.coverage
 *.log
 .hypothesis

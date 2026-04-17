@@ -120,7 +120,7 @@ runner = CliRunner()
 
 
 @st.composite
-def filenames_strategy(draw):
+def filenames_strategy(draw: st.DrawFn) -> str:
     # 1. Генерируем основу имени (stem)
     # Используем алфавит с цифрами, тире и подчеркиванием
     stem_alphabet = "abcdefghijklmnopqrstuvwxyz0123456789-_"
@@ -141,7 +141,7 @@ def filenames_strategy(draw):
 
 # --- СТРАТЕГИЯ ГЕНЕРАЦИИ ДАННЫХ ---
 @st.composite
-def cli_fuzz_strategy(draw) -> dict[str, Any]:
+def cli_fuzz_strategy(draw: st.DrawFn) -> dict[str, Any]:
     """Генерирует случайные, но логически допустимые комбинации аргументов"""
 
     server_seed = draw(st.integers(min_value=0, max_value=99999999))
@@ -174,13 +174,13 @@ def cli_fuzz_strategy(draw) -> dict[str, Any]:
         "--no-verify": draw(st.booleans()),
     }
 
-    PLACEHOLDER = "http://localhost:SERVER_PORT/"
+    placeholder = "http://localhost:SERVER_PORT/"
 
     cli_urls = []
     file_urls = []
 
     for i, p in enumerate(paths_with_meta):
-        url = f"{PLACEHOLDER}{p}"
+        url = f"{placeholder}{p}"
         if input_mode == 0 or (input_mode == 2 and i % 2 == 0):
             cli_urls.append(url)
         else:
@@ -285,7 +285,6 @@ def test_hypothesis_nuclear_fuzzer(
     # Инвариант 4: Если это обычная загрузка, файлы должны лежать на диске
     if not data["is_stream"] and not data["is_dry_run"] and result.exit_code == 0:
         # Количество скачанных файлов должно совпадать с количеством уникальных ссылок
-        num = 1 if data["existing_copies"] else 0
         assert len(leftovers) <= len(data["paths"]) + num_file, (
             f"Файлы не скачались! Лог терминала:\n{result.stdout}"
         )

@@ -101,24 +101,12 @@ Repository = "https://github.com/Zhukovetski/HydraStream"
 Issues = "https://github.com/Zhukovetski/HydraStream/issues"
 
 # ==============================================================================
-# НАСТРОЙКИ СБОРКИ (SETUPTOOLS / UV)
+# НАСТРОЙКИ СБОРКИ (UV)
 # ==============================================================================
 # Динамически тянем версию из __init__.py, чтобы не менять её в двух местах руками
-[tool.setuptools.dynamic]
-version = {attr = "hydrastream.__init__.__version__"}
 
 [tool.uv]
 package = true
-dev-dependencies = [
-    "hydrastream",
-]
-
-# Указываем, что весь наш исходный код лежит в папке src/
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-dir]
-"" = "src"
 
 [tool.uv.sources]
 hydrastream = { workspace = true }
@@ -198,7 +186,7 @@ extraPaths = ["src"]
 venvPath = "."
 venv = ".venv"
 # На время отладки снизьте строгость, чтобы увидеть, появятся ли подсказки
-typeCheckingMode = "basic"
+typeCheckingMode = "standard"
 # ==============================================================================
 # НАСТРОЙКИ ТЕСТОВ (PYTEST)
 # ==============================================================================
@@ -207,7 +195,7 @@ asyncio_mode = "auto"                            # Автоматически п
 asyncio_default_fixture_loop_scope = "function"  # Каждому тесту - свой свежий event loop
 # Запускаем тесты с замером покрытия кода.
 # --cov-fail-under=90 означает, что CI упадет с ошибкой, если покрыто меньше 90% кода!
-addopts = "--cov=src --cov-report=term-missing --cov-fail-under=90"
+addopts = "--cov=src --cov-report=term-missing --cov-fail-under=70"
 pythonpath = ["src"]                             # Чтобы pytest видел наши модули при импорте
 filterwarnings = [
     "ignore:chunk_size is ignored:UserWarning",

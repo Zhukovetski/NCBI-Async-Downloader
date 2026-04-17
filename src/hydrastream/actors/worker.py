@@ -7,7 +7,6 @@ import os
 import random
 import sys
 from dataclasses import dataclass
-from typing import cast
 
 from curl_cffi import Response
 from curl_cffi.requests import RequestsError
@@ -67,8 +66,9 @@ class DownloadWorker:
             id, chunk = await ctx.queues.chunk.get()
         else:
             chunk, id = await ctx.queues.chunk.get()
-        chunk = cast(Chunk, chunk)
-        id = cast(int, id)
+
+        if not isinstance(chunk, Chunk) or not isinstance(id, int):
+            raise ValueError
 
         if sys.maxsize - ctx.tasks.workers < id:
             if not ctx.sync.stop_adaptive_controller.is_set():
@@ -101,6 +101,7 @@ class DownloadWorker:
         return chunk
 
     async def run(self, ctx: HydraContext) -> None:
+        chunk = None
         while True:
             try:
                 if self.worker_id >= ctx.dynamic_limit:
@@ -108,68 +109,72 @@ class DownloadWorker:
                         await ctx.sync.dynamic_limit.wait_for(
                             lambda: self.worker_id < ctx.dynamic_limit
                         )
-                chunk = None
                 chunk = await self.get_chunk(ctx)
                 if chunk is None:
                     continue
                 await self.process_chunk(ctx, chunk)
                 await self.file_done(ctx, chunk)
-
-            except WorkerScaleDown:
-                if chunk:
-                    if ctx.stream:
-                        await ctx.queues.chunk.put((-1, chunk))
-                    else:
-                        await ctx.queues.chunk.put((chunk, -1))
-
             except asyncio.CancelledError:
                 break
-
-            except RequestsError as e:
-                if chunk:
-                    response = e.response  # type: ignore
-
-                    if isinstance(response, Response):
-                        # Теперь Pyright ВИДИТ, что это Response, и даст автодополнение
-                        status = response.status_code
-
-                        if status in {400, 401, 403, 404, 410, 416}:
-                            await log(
-                                ctx.ui,
-                                f"Chunk for {chunk.file.meta.filename} failed"
-                                f" permanently (HTTP {status}).",
-                                status=LogStatus.ERROR,
-                            )
-                            chunk.file.is_failed = True
-                            ctx.fs.delete_file(chunk.file.meta.filename)
-                            if ctx.stream:
-                                raise DownloadFailedError(
-                                    url=chunk.file.meta.url,
-                                    status_code=status,
-                                    reason=response.reason,
-                                ) from None
-
-                        # Остальные ошибки сервера (5xx, 429) — пробуем перекинуть чанк
-                        # в очередь
-                        else:
-                            await self.requeue_chunk(ctx, chunk, delay_range=(0.5, 2.0))
-                    # 2. Если ответа нет (Сетевая ошибка / CurlError / Timeout)
-                    else:
-                        await self.requeue_chunk(ctx, chunk)
-
-                ctx.dynamic_limit = max(ctx.dynamic_limit - 1, 1)
-                async with ctx.sync.dynamic_limit:
-                    ctx.sync.dynamic_limit.notify_all()
-
-            except TimeoutError:
-                if chunk:
-                    await self.requeue_chunk(ctx, chunk)
-
             except Exception as e:
-                await log(
-                    ctx.ui, f"Worker internal crash: {e!r}", status=LogStatus.CRITICAL
+                await self.handle_worker_error(ctx, e, chunk)
+
+    async def handle_worker_error(
+        self, ctx: HydraContext, e: Exception, chunk: Chunk | None
+    ) -> None:
+        if isinstance(e, WorkerScaleDown):
+            if chunk:
+                await ctx.queues.chunk.put((-1, chunk) if ctx.stream else (chunk, -1))
+            return
+
+        if isinstance(e, RequestsError):
+            await self._handle_requests_error(ctx, e, chunk)
+            ctx.dynamic_limit = max(ctx.dynamic_limit - 1, 1)
+            async with ctx.sync.dynamic_limit:
+                ctx.sync.dynamic_limit.notify_all()
+            return
+
+        if isinstance(e, TimeoutError):
+            if chunk:
+                await self.requeue_chunk(ctx, chunk)
+            return
+
+        await log(ctx.ui, f"Worker internal crash: {e!r}", status=LogStatus.CRITICAL)
+        raise e
+
+    async def _handle_requests_error(
+        self, ctx: HydraContext, e: RequestsError, chunk: Chunk | None
+    ) -> None:
+        """Разбирает сетевые ошибки и решает: убить файл или переповторить чанк."""
+        if not chunk:
+            return
+
+        response = e.response
+        if not isinstance(response, Response):
+            await self.requeue_chunk(ctx, chunk)
+            return
+
+        status = response.status_code
+
+        # Логика "Фатальных" ошибок
+        if status in {400, 401, 403, 404, 410, 416}:
+            await log(
+                ctx.ui,
+                f"Chunk for {chunk.file.meta.filename} "
+                f"failed permanently (HTTP {status}).",
+                status=LogStatus.ERROR,
+            )
+            chunk.file.is_failed = True
+            ctx.fs.delete_file(chunk.file.meta.filename)
+
+            if ctx.stream:
+                raise DownloadFailedError(
+                    url=chunk.file.meta.url,
+                    status_code=status,
+                    reason=response.reason,
                 )
-                raise
+        else:
+            await self.requeue_chunk(ctx, chunk, delay_range=(0.5, 2.0))
 
     async def requeue_chunk(
         self,
@@ -245,8 +250,7 @@ class DownloadWorker:
         ) as r:
             ctx.active_stream.add(r)
             try:
-                async for data in r.aiter_content(chunk_size=131072):  # type: ignore
-                    data = cast(bytes, data)
+                async for data in r.aiter_content(chunk_size=131072):
                     buffer.extend(data)
                     update(ctx.ui, chunk.file.meta.filename, len(data))
                     if len(buffer) >= buffer_size:
@@ -278,8 +282,7 @@ class DownloadWorker:
         ) as r:
             ctx.active_stream.add(r)
             try:
-                async for data in r.aiter_content(chunk_size=131072):  # type: ignore
-                    data = cast(bytes, data)
+                async for data in r.aiter_content(chunk_size=131072):
                     buffer.extend(data)
                     update(ctx.ui, chunk.file.meta.filename, len(data))
                     if len(buffer) > ctx.config.STREAM_CHUNK_SIZE:

@@ -13,11 +13,11 @@ jobs:
           # 1. MLOps цель (Hugging Face - Cloudflare) ~ 500 MB
           - name: "Hugging Face (Cloudflare WAF)"
             url: "https://huggingface.co/gpt2/resolve/main/model.safetensors"
-          
+
           # 2. Биоинформатика (EBI - Strict TLS Fingerprinting)
           - name: "EBI (Strict TLS Firewall)"
             url: "https://ftp.sra.ebi.ac.uk/vol1/fastq/ERR022/ERR022003/ERR022003_1.fastq.gz"
-            
+
           # 3. Государственный архив (NCBI - Rate Limits & 503 Errors)
           - name: "NCBI (Standard High-Latency)"
             url: "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.fna.gz"
@@ -30,7 +30,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          
+
       - run: |
           uv python install 3.11
           uv tool install .
@@ -69,7 +69,7 @@ jobs:
           import os, sys, hf_transfer
           try:
               hf_transfer.download(
-                  url='${{ matrix.target.url }}', 
+                  url='${{ matrix.target.url }}',
                   filename='test_hf.bin',
                   max_files=128,
                   chunk_size=10485760

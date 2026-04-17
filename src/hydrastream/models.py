@@ -18,7 +18,6 @@ from typing import (
     Self,
     TypedDict,
     TypeVar,
-    cast,
     dataclass_transform,
     get_args,
 )
@@ -442,7 +441,7 @@ class NetworkState:
     def __post_init__(self) -> None:
         self.rate_limiter = AMIDState(max_rps=self.threads * 2, monitor=self.monitor)
 
-        options = cast(dict[str, Any], self.client_kwargs or {}).copy()
+        options = (self.client_kwargs or {}).copy()
 
         user_headers = options.pop("headers", None)
         headers_obj = Headers(user_headers)
@@ -477,7 +476,6 @@ def validate_speed_limit(value: float | None) -> None:
 
 
 def validate_positive_int(param_name: str, value: int | None) -> None:
-
     if value is None:
         return
 
@@ -590,16 +588,18 @@ class HydraConfig:
 @entity
 class QueueSet:
     links: asyncio.PriorityQueue[tuple[int, str, Checksum | None]] = field(
-        default_factory=asyncio.PriorityQueue
+        default_factory=asyncio.PriorityQueue[tuple[int, str, Checksum | None]]
     )
     dispatch_file: asyncio.PriorityQueue[tuple[int, File | None]] = field(
-        default_factory=asyncio.PriorityQueue
+        default_factory=asyncio.PriorityQueue[tuple[int, File | None]]
     )
-    file_discovery: asyncio.Queue[int] = field(default_factory=asyncio.Queue)
+    file_discovery: asyncio.Queue[int] = field(default_factory=asyncio.Queue[int])
     chunk: asyncio.PriorityQueue[tuple[int, Chunk] | tuple[Chunk, int]] = field(
-        default_factory=asyncio.PriorityQueue
+        default_factory=asyncio.PriorityQueue[tuple[int, Chunk] | tuple[Chunk, int]]
     )
-    stream: asyncio.Queue[tuple[int, bytearray]] = field(default_factory=asyncio.Queue)
+    stream: asyncio.Queue[tuple[int, bytearray]] = field(
+        default_factory=asyncio.Queue[tuple[int, bytearray]]
+    )
 
 
 @entity

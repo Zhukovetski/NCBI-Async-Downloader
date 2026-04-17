@@ -137,7 +137,6 @@ class HydraClient:
         input_file: str | None = None,
         expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None = None,
     ) -> AsyncGenerator[tuple[str, AsyncGenerator[memoryview]]]:
-
         links = await self.validate(links, input_file)
         self.state = HydraContext(
             config=self.config, fs=self.fs, provider=self.provider
@@ -149,7 +148,6 @@ class HydraClient:
         links: list[str] | str | None,
         input_file: str | None,
     ) -> list[str]:
-
         if not links and not input_file:
             raise ValidationError(
                 param="links",
@@ -226,7 +224,7 @@ def get_input_stream(filepath: str) -> Generator[TextIO, None, None]:
 async def parse_urls(
     ctx: UIState, links_from_args: list[str] | None, filepath: str | None
 ) -> list[str]:
-    all_links = []
+    all_links: list[str] = []
 
     # Обработка аргументов
     if links_from_args:

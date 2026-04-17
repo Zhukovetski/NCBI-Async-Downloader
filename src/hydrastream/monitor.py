@@ -240,7 +240,6 @@ def add_file(ctx: UIState, filename: str, total_size: int | None = None) -> None
 
 
 def update(ctx: UIState, filename: str, advance_bytes: int) -> None:
-
     ctx.rich.buffer[filename] += advance_bytes
     ctx.progress.download_bytes += advance_bytes
 
@@ -456,12 +455,8 @@ async def print_dry_run_report(
     for f in files.values():
         f.create_chunks()
         str_size = format_size(f.meta.content_length)
-        if ctx.display.verify:
-            if f.meta.expected_checksum:
-                has_hash = "✅"
-                ctx.progress.has_hash += 1
-            else:
-                has_hash = "❌"
+        if ctx.display.verify and f.meta.expected_checksum:
+            ctx.progress.has_hash += 1
 
         if f.meta.supports_ranges:
             ranges = "✅"
@@ -474,47 +469,47 @@ async def print_dry_run_report(
                 f.meta.filename,
                 str_size,
                 str(len(f.chunks)),
-                has_hash,
+                "✅" if f.meta.expected_checksum else "❌",
                 ranges,
             )
         else:
             table.add_row(f.meta.filename, str_size, str(len(f.chunks)), ranges)
     # Печатаем таблицу в stderr (чтобы не сломать пайпы)
     ctx.rich.console.print(table)
-
-    # 4. Проверка свободного места (Только для режима диска)
     if not stream:
-        # ctx.config.output_dir мы парсим через Path, как ты делал в Storage
+        await check_storage_capacity(ctx, output_path=output_dir)
 
-        output_dir = Path(output_dir).expanduser().resolve()
 
-        # Если папки еще нет, проверяем место на родительском диске
-        check_dir = output_dir if output_dir.exists() else output_dir.parent
+async def check_storage_capacity(ctx: UIState, output_path: str | Path) -> None:
+    """Проверяет наличие свободного места на диске перед началом загрузки."""
 
-        try:
-            free_space = shutil.disk_usage(check_dir).free
+    output_dir = Path(output_path).expanduser().resolve()
+    check_dir = output_dir if output_dir.exists() else output_dir.parent
 
-            if free_space < ctx.progress.total_bytes:
-                ctx.rich.console.print(
-                    "\n[bold red] DANGER: Insufficient disk space![/]"
-                )
-                ctx.rich.console.print(
-                    f"[red]Required: {format_size(ctx.progress.total_bytes)} | "
-                    f"Available: {format_size(free_space)}[/]"
-                )
-            else:
-                ctx.rich.console.print(
-                    f"\n[bold green] Disk space check passed "
-                    f"({format_size(free_space)} free).[/]\n"
-                )
-        except OSError as e:
-            if ctx.display.debug:
-                raise
-            await log(
-                ctx,
-                f"Warning: Could not check disk space: {e}",
-                status=LogStatus.WARNING,
+    try:
+        free_space = shutil.disk_usage(check_dir).free
+        required = ctx.progress.total_bytes
+
+        if free_space < required:
+            ctx.rich.console.print("\n[bold red] DANGER: Insufficient disk space![/]")
+            ctx.rich.console.print(
+                f"[red]Required: {format_size(required)} | "
+                f"Available: {format_size(free_space)}[/]"
             )
+        else:
+            ctx.rich.console.print(
+                f"\n[bold green] Disk space check passed "
+                f"({format_size(free_space)} free).[/]\n"
+            )
+
+    except OSError as e:
+        if ctx.display.debug:
+            raise
+        await log(
+            ctx,
+            f"Warning: Could not check disk space: {e}",
+            status=LogStatus.WARNING,
+        )
 
 
 async def handle_exit(ctx: UIState) -> None:
@@ -552,7 +547,15 @@ async def handle_exit(ctx: UIState) -> None:
         "average_speed": avg_speed,
         "time_elapsed_sec": elapsed,
     }
-    await log(ctx, report, **report_dict)
+    await log(
+        ctx,
+        report,
+        status=LogStatus.INFO,
+        progress=False,
+        throttle_key=None,
+        throttle_sec=10.0,
+        **report_dict,
+    )
 
 
 async def ui_start(ctx: UIState) -> None:

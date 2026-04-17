@@ -11,7 +11,7 @@ jobs:
       matrix:
         python-version: ['3.11', '3.12', '3.13', '3.14']
       # fail-fast: false гарантирует, что если одна версия упадет, остальные продолжат тест
-      fail-fast: false 
+      fail-fast: false
 
     env:
       TEST_URL: "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.fna.gz"
@@ -40,8 +40,8 @@ jobs:
           echo "=================================================="
           echo "Testing HydraStream on Python ${{ matrix.python-version }}"
           echo "=================================================="
-          
+
           # Вызываем бинарник прямо из изолированного venv
-          time ./bench_env/bin/hs $TEST_URL -t 15 -q --no-verify -o ./hs_out 
-          
+          time ./bench_env/bin/hs $TEST_URL -t 15 -q --no-verify -o ./hs_out
+
           rm -rf ./hs_out

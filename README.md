@@ -89,7 +89,7 @@ from hydrastream import HydraClient, HydraConfig
 async def main():
     config = HydraConfig(threads=20, quiet=True)
     urls = ["https://example.com/file1.gz"]
-    
+
     async with HydraClient(config=config) as client:
         # Returns an async generator yielding (filename, chunk_generator)
         async for filename, file_stream in await client.stream(urls):
@@ -135,4 +135,3 @@ Port the core engine to Rust (`tokio`/`reqwest`) with a `PyO3` wrapper to bypass
 ## License
 
 MIT License. See the [LICENSE](LICENSE) file for details.
-

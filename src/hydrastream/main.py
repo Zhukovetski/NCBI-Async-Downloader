@@ -31,9 +31,16 @@ from hydrastream.models import (
 )
 from hydrastream.monitor import log, log_start, log_stop, report
 
+if sys.platform != "win32":
+    try:
+        import uvloop
 
-def load_user_config() -> dict:
+        uvloop.install()
+    except ImportError:
+        pass
 
+
+def load_user_config() -> dict[str, Any]:
     config_path = Path.home() / ".config" / "hydrastream" / "config.toml"
 
     if not config_path.is_file():
@@ -105,20 +112,18 @@ async def async_main(  # noqa: C901, PLR0912
         browser: Browser TLS fingerprint to impersonate.
         debug: Enable debug mode to propagate full tracebacks on failure.
     """  # noqa: E501
+    ui = UIState(
+        display=DisplayConfig(
+            no_ui=no_ui,
+            quiet=quiet,
+            dry_run=dry_run,
+            json_logs=json_logs,
+            verify=verify,
+        ),
+        log=LogState(log_file=Path(output_dir).expanduser().resolve() / "download.log"),
+        speed=SpeedLimiterState(speed_limit=speed_limit),
+    )
     try:
-        ui = UIState(
-            display=DisplayConfig(
-                no_ui=no_ui,
-                quiet=quiet,
-                dry_run=dry_run,
-                json_logs=json_logs,
-                verify=verify,
-            ),
-            log=LogState(
-                log_file=Path(output_dir).expanduser().resolve() / "download.log"
-            ),
-            speed=SpeedLimiterState(speed_limit=speed_limit),
-        )
         await log_start(ui)
 
         expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] = {}
@@ -210,18 +215,12 @@ async def async_main(  # noqa: C901, PLR0912
 
                 sys.exit(ExitCode.SUCCESS)
 
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        if debug:
-            raise
-
-        sys.exit(ExitCode.INTERRUPTED)
-
-    except (Exception, ExceptionGroup) as e:
+    except (BaseException, BaseExceptionGroup) as e:
         if debug:
             raise
         await handle_crash(ui, e)
         codes = []
-        if isinstance(e, ExceptionGroup):
+        if isinstance(e, BaseExceptionGroup):
             codes = [
                 err.exit_code for err in e.exceptions if isinstance(err, HydraError)
             ]
@@ -235,13 +234,13 @@ async def async_main(  # noqa: C901, PLR0912
         await log_stop(ui)
 
 
-async def handle_crash(ui: UIState, error: Exception | ExceptionGroup) -> None:
+async def handle_crash(
+    ui: UIState, error: BaseException | BaseExceptionGroup[BaseException]
+) -> None:
+    if isinstance(error, asyncio.CancelledError | KeyboardInterrupt):
+        sys.exit(ExitCode.INTERRUPTED)
 
-    if isinstance(error, (asyncio.CancelledError, KeyboardInterrupt)):
-        await log(ui, "Interrupted", status=LogStatus.INTERRUPT)
-        return
-
-    if isinstance(error, ExceptionGroup):
+    if isinstance(error, BaseExceptionGroup):
         for e in error.exceptions:
             await handle_crash(ui, e)
     elif isinstance(error, HydraError):
@@ -413,15 +412,6 @@ def cli(
     HydraStream: Concurrent HTTP downloader with in-memory stream reordering
     (curl_cffi + uvloop).
     """
-    if sys.platform != "win32":
-        try:
-            import uvloop  # noqa
-
-            uvloop.install()
-        except ImportError:
-            if debug:
-                raise
-            pass
 
     if threads is None:
         threads = 128

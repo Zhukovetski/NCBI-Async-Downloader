@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TypeVarTuple, Unpack
 
 from hydrastream.actors.autosaver import autosaver, save_all_states
-from hydrastream.actors.controller import adaptive_controller
+from hydrastream.actors.controller import AdaptiveEngine
 from hydrastream.actors.dispatcher import chunk_dispatcher
 from hydrastream.actors.resolver import metadata_resolver
 from hydrastream.actors.throttler import throttle_controller
@@ -42,7 +42,6 @@ async def delayed_task(
 
 
 async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) -> None:
-
     if not ctx.is_running:
         return
 
@@ -75,14 +74,13 @@ async def stop(ctx: HydraContext, complete: bool = False) -> None:
             status=LogStatus.INTERRUPT,
         )
 
-    if ctx.stream:
-        with contextlib.suppress(asyncio.QueueFull):
-            ctx.queues.stream.put_nowait((-1, bytearray()))
-            ctx.queues.file_discovery.put_nowait(-1)
+        if ctx.stream:
+            with contextlib.suppress(asyncio.QueueFull):
+                ctx.queues.stream.put_nowait((-1, bytearray()))
+                ctx.queues.file_discovery.put_nowait(-1)
 
 
 async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[memoryview]:
-
     file_obj = ctx.files[file_id]
     total_size = file_obj.meta.content_length
 
@@ -156,14 +154,7 @@ async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[memoryv
             ctx.sync.current_files.notify()
 
 
-async def create_tasks(
-    ctx: HydraContext,
-    tg: asyncio.TaskGroup,
-    loop: asyncio.AbstractEventLoop,
-    links: list[str],
-    expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None,
-) -> None:
-
+async def prepare_runtime(ctx: HydraContext, loop: asyncio.AbstractEventLoop) -> None:
     optimal_threads = max(20, ctx.config.threads + 10)
     max_safe_threads = min(optimal_threads, 64)
     custom_pool = ThreadPoolExecutor(
@@ -181,6 +172,13 @@ async def create_tasks(
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, handle_signal)
 
+
+async def create_tasks(
+    ctx: HydraContext,
+    tg: asyncio.TaskGroup,
+    links: list[str],
+    expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None,
+) -> None:
     ctx.tasks.resolvers = math.ceil(len(links) ** 0.4) if len(links) > 1 else 1
     ctx.tasks.resolvers = min(ctx.tasks.resolvers, 20)
 
@@ -216,7 +214,8 @@ async def create_tasks(
         ctx.tasks.throttler = 1
 
         if ctx.config.threads > 1:
-            tg.create_task(adaptive_controller(ctx), name="Controller")
+            controller = AdaptiveEngine(ctx)
+            tg.create_task(controller.run(), name="Controller")
             ctx.tasks.controller = 1
 
         if not ctx.stream:
@@ -229,7 +228,6 @@ async def link_feeder(
     links: str | Iterable[str],
     expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None,
 ) -> None:
-
     checksums = None
     for i, link in enumerate(links):
         if expected_checksums is not None:
@@ -257,15 +255,15 @@ async def stream_all(
     links: list[str],
     expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None,
 ) -> AsyncGenerator[tuple[str, AsyncGenerator[memoryview]]]:
-
     ctx.stream = True
     loop = asyncio.get_running_loop()
+    await prepare_runtime(ctx, loop)
 
     try:
         try:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(session_killer(ctx), name="SessionKiller")
-                await create_tasks(ctx, tg, loop, links, expected_checksums)
+                await create_tasks(ctx, tg, links, expected_checksums)
                 file_gen = None
                 while True:
                     file_id = await ctx.queues.file_discovery.get()
@@ -303,11 +301,13 @@ async def run_downloads(
     ctx.stream = False
 
     loop = asyncio.get_running_loop()
+    await prepare_runtime(ctx, loop)
+
     try:
         try:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(session_killer(ctx), name="SessionKiller")
-                await create_tasks(ctx, tg, loop, links, expected_checksums)
+                await create_tasks(ctx, tg, links, expected_checksums)
             if ctx.config.dry_run:
                 await print_dry_run_report(
                     ctx.ui, ctx.files, ctx.stream, ctx.config.output_dir

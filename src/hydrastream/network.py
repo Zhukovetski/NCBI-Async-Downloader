@@ -168,7 +168,7 @@ async def safe_request(
         response = None
         async with acquire(ctx.rate_limiter):
             try:
-                resp = await ctx.client.request(method, url, **kwargs)  # type: ignore
+                resp = await ctx.client.request(method, url, **kwargs)
                 if resp.status_code < 400:
                     if random.random() < 0.1:
                         await try_scale_up(ctx.rate_limiter)

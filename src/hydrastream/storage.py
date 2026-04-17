@@ -182,7 +182,6 @@ class LocalStorageManager:
             )
 
     def get_unique_path(self, file_path: Path) -> Path:
-
         stem = file_path.stem
         suffix = file_path.suffix
         directory = file_path.parent

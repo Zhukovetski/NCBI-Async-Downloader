@@ -9,7 +9,6 @@ async def link_feeder(
     links: str | Iterable[str],
     expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None,
 ) -> None:
-
     checksums = None
     for i, link in enumerate(links):
         if expected_checksums is not None:
