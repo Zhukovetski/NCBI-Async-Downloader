@@ -109,7 +109,7 @@ HydraStream supports layered configuration. Options can be passed as CLI argumen
 | `LINKS` | - | `None` | One or multiple target URLs to download (positional argument). |
 | `--input` | `-i` | `None` | Read URLs from a text file or `-` for stdin. |
 | `--typehash` | `-th` | `md5` | Hash algorithm type (e.g., `md5`, `sha256`). |
-| `--hash` | - | `None` | Expected hash checksum (applicable only for a single URL). |
+| `--checksum` | - | `None` | Expected hash checksum (applicable only for a single URL). |
 | `--output` | `-o` | `download/` | Destination directory for downloaded files. |
 | `--threads` | `-t` | `Auto` | Number of concurrent download connections (scales up to 128). |
 | `--stream` | `-s` | `False` | Enable streaming mode (redirects binary data to `stdout`). |

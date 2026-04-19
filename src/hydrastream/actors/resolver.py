@@ -8,6 +8,7 @@ import sys
 from curl_cffi import Headers, Response
 from curl_cffi.requests import RequestsError
 
+from hydrastream._curl_shim import get_error_response
 from hydrastream.exceptions import LogStatus, SystemContextError
 from hydrastream.models import Checksum, File, FileMeta, HydraContext, TypeHash
 from hydrastream.monitor import add_file, done, log, update
@@ -54,7 +55,7 @@ async def metadata_resolver(  # noqa
             break
 
         except RequestsError as e:
-            response = e.response
+            response = get_error_response(e)
 
             if isinstance(response, Response):
                 status = response.status_code

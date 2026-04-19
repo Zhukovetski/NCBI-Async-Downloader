@@ -6,14 +6,17 @@ import contextlib
 import os
 import random
 import sys
+import traceback
 from dataclasses import dataclass
 
 from curl_cffi import Response
 from curl_cffi.requests import RequestsError
 
+from hydrastream._curl_shim import aiter_bytes, get_error_response
 from hydrastream.exceptions import (
     DownloadFailedError,
     LogStatus,
+    RangeRequestNotSupportedError,
     WorkerScaleDown,
 )
 from hydrastream.models import Chunk, HydraContext
@@ -54,20 +57,24 @@ class DownloadWorker:
 
                 await self.file_done()
             except asyncio.CancelledError:
-                break
+                raise
             except Exception as e:
                 await self.handle_worker_error(e)
             finally:
                 self.chunk = None
 
-    async def get_chunk(self) -> Chunk | None:
+    async def get_chunk(self) -> None:
         if self.ctx.stream:
             id, chunk = await self.ctx.queues.chunk.get()
         else:
             chunk, id = await self.ctx.queues.chunk.get()
 
         if not isinstance(chunk, Chunk) or not isinstance(id, int):
-            raise ValueError
+            raise TypeError(
+                f"Expected (Chunk, int), but got "
+                f"({type(chunk).__name__}, {type(id).__name__})"
+            )
+
         self.chunk = chunk
 
         if sys.maxsize - self.ctx.tasks.workers < id:
@@ -89,7 +96,7 @@ class DownloadWorker:
 
         file_obj = chunk.file
         if not file_obj or file_obj.is_failed:
-            return None
+            return
 
         if self.ctx.stream:
             async with self.ctx.sync.chunk_from_future:
@@ -120,9 +127,21 @@ class DownloadWorker:
                 await self.requeue_chunk()
             return
 
-        await log(
-            self.ctx.ui, f"Worker internal crash: {e!r}", status=LogStatus.CRITICAL
-        )
+        tb_str = traceback.format_exc()
+
+        if self.ctx.config.debug:
+            # В дебаге выводим в консоль/лог всю простыню, чтобы сразу найти баг
+            await log(
+                self.ctx.ui, f"CRITICAL CRASH:\n{tb_str}", status=LogStatus.CRITICAL
+            )
+
+        else:
+            await log(
+                self.ctx.ui,
+                f"Worker internal crash: {e!r}",
+                status=LogStatus.CRITICAL,
+                traceback=tb_str,  # Это поле уйдет в файл download.log!
+            )
         raise e
 
     async def _handle_requests_error(self, e: RequestsError) -> None:
@@ -130,7 +149,7 @@ class DownloadWorker:
         if not self.chunk:
             return
 
-        response = e.response
+        response = get_error_response(e)
         if not isinstance(response, Response):
             await self.requeue_chunk()
             return
@@ -169,16 +188,9 @@ class DownloadWorker:
 
         if not supports_ranges:
             if self.ctx.stream:
-                err_msg = (
-                    f"Stream interrupted for {self.chunk.file.meta.filename}. "
-                    f"Server does not support partial downloads (Range requests). "
-                    f"Cannot resume stream. Aborting."
+                raise RangeRequestNotSupportedError(
+                    url=self.chunk.file.meta.url, filename=self.chunk.file.meta.filename
                 )
-                await log(self.ctx.ui, err_msg, status=LogStatus.CRITICAL)
-
-                file_obj.is_failed = True
-                return
-
             await log(
                 self.ctx.ui,
                 f"Connection dropped for {self.chunk.file.meta.filename}. "
@@ -243,11 +255,11 @@ class DownloadWorker:
             self.chunk.file.meta.url,
             headers=headers,
         ) as r:
-            self.ctx.active_stream.add(r)
             try:
+                self.ctx.active_stream.add(r)
                 bytes_to_read = self.chunk.end - self.chunk.current_pos + 1
 
-                async for data in r.aiter_content(chunk_size=131072):
+                async for data in aiter_bytes(r, chunk_size=131072):
                     if len(data) > bytes_to_read:
                         data = data[:bytes_to_read]  # noqa: PLW2901
 
@@ -282,50 +294,42 @@ class DownloadWorker:
     ) -> None:
         if not self.chunk:
             return
-
-        buffer = bytearray()
+        data = b""
         async with stream_chunk(
             self.ctx.net,
             self.chunk.file.meta.url,
             headers=headers,
         ) as r:
-            self.ctx.active_stream.add(r)
             try:
+                self.ctx.active_stream.add(r)
                 bytes_to_read = self.chunk.end - self.chunk.current_pos + 1
 
-                async for data in r.aiter_content(chunk_size=131072):
+                async for data in aiter_bytes(r, chunk_size=131072):
                     if len(data) > bytes_to_read:
                         data = data[:bytes_to_read]  # noqa: PLW2901
 
-                    buffer.extend(data)
                     bytes_to_read -= len(data)
                     update(self.ctx.ui, self.chunk.file.meta.filename, len(data))
-                    if len(buffer) > self.ctx.config.STREAM_CHUNK_SIZE:
-                        await self.ctx.queues.stream.put((
-                            self.chunk.current_pos,
-                            buffer,
-                        ))
-                        self.chunk.current_pos = self.chunk.current_pos + len(buffer)
-                        buffer = bytearray()
+
+                    await self.ctx.queues.stream.put((self.chunk.current_pos, data))
+                    self.chunk.current_pos = self.chunk.current_pos + len(data)
 
                     if self.ctx.dynamic_limit <= self.worker_id:
                         raise WorkerScaleDown
 
                     if bytes_to_read <= 0:
                         break
-                await self.ctx.queues.stream.put((self.chunk.current_pos, buffer))
-                self.chunk.current_pos = self.chunk.current_pos + len(buffer)
-                buffer = bytearray()
+
             except asyncio.CancelledError:
                 raise
             except Exception:
-                if self.ctx.stream and buffer:
+                if self.ctx.stream and data:
                     with contextlib.suppress(asyncio.QueueFull):
                         self.ctx.queues.stream.put_nowait((
                             self.chunk.current_pos,
-                            buffer,
+                            data,
                         ))
-                        self.chunk.current_pos = self.chunk.current_pos + len(buffer)
+                        self.chunk.current_pos = self.chunk.current_pos + len(data)
                 raise
             finally:
                 self.ctx.active_stream.remove(r)

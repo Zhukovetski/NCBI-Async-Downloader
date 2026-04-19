@@ -18,6 +18,7 @@ from curl_cffi import CurlError, Headers, Response
 from curl_cffi.requests import RequestsError
 from curl_cffi.requests.session import HttpMethod, RequestParams
 
+from hydrastream._curl_shim import request
 from hydrastream.exceptions import LogStatus
 from hydrastream.models import AMIDState, NetworkState
 from hydrastream.monitor import log
@@ -168,7 +169,7 @@ async def safe_request(
         response = None
         async with acquire(ctx.rate_limiter):
             try:
-                resp = await ctx.client.request(method, url, **kwargs)
+                resp = await request(ctx.client, method, url, **kwargs)
                 if resp.status_code < 400:
                     if random.random() < 0.1:
                         await try_scale_up(ctx.rate_limiter)

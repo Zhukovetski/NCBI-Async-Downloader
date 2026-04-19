@@ -136,7 +136,7 @@ class HydraClient:
         links: list[str] | str | None = None,
         input_file: str | None = None,
         expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None = None,
-    ) -> AsyncGenerator[tuple[str, AsyncGenerator[memoryview]]]:
+    ) -> AsyncGenerator[tuple[str, AsyncGenerator[bytes]]]:
         links = await self.validate(links, input_file)
         self.state = HydraContext(
             config=self.config, fs=self.fs, provider=self.provider
@@ -174,20 +174,6 @@ def validate_input_file(value: str | None) -> None:
         raise ValidationError(param="input", value=value, reason="File does not exist")
     if not path.is_file():
         raise ValidationError(param="input", value=value, reason="Target is not a file")
-
-
-def validate_output_dir(value: str) -> None:
-    path = Path(value)
-    if path.exists() and not path.is_dir():
-        raise ValidationError(
-            param="output", value=value, reason="Path exists but is not a directory"
-        )
-    try:
-        path.resolve()
-    except Exception as e:
-        raise ValidationError(
-            param="output", value=value, reason="Invalid path format"
-        ) from e
 
 
 def is_valid_url(url: str) -> bool:

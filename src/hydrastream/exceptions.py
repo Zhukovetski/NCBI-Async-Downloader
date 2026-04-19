@@ -242,3 +242,22 @@ class InvalidParameterError(HydraError):
     reason: str
     exit_code: ExitCode = ExitCode.USAGE_ERROR
     log_status: LogStatus = LogStatus.WARNING  # Для ссылок можно WARNING,
+
+
+@dataclass(kw_only=True)
+class RangeRequestNotSupportedError(HydraError):
+    url: str
+    filename: str
+
+    exit_code: ExitCode = ExitCode.NETWORK_ERROR
+    log_status: LogStatus = LogStatus.ERROR
+
+    def __post_init__(self) -> None:
+        self.url = redact_url(self.url)
+        self.message_tpl = (
+            f"Stream interrupted for {self.filename}. "
+            f"Server does not support partial downloads "
+            f"(Range requests) for {self.url}. "
+            f"Cannot resume stream. Aborting."
+        )
+        super().__post_init__()

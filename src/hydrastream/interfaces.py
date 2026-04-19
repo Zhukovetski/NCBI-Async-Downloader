@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
 
+from typing_extensions import Buffer, runtime_checkable
+
 if TYPE_CHECKING:
     from hydrastream.models import Checksum, File, NetworkState, TypeHash
 
 
+@runtime_checkable
 class StorageBackend(Protocol):
     def allocate_space(self, filename: str, size: int) -> str | None: ...
 
@@ -36,7 +39,14 @@ class StorageBackend(Protocol):
     def get_state_path(self, filename: str) -> Any: ...
 
 
+@runtime_checkable
 class HashProvider(Protocol):
     async def resolve(
         self, ctx: NetworkState, url: str, filename: str
     ) -> Checksum | None: ...
+
+
+@runtime_checkable
+class Hasher(Protocol):
+    def update(self, data: Buffer, /) -> None: ...
+    def hexdigest(self) -> str: ...

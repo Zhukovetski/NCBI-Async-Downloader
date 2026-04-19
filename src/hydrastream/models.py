@@ -7,7 +7,6 @@ import asyncio
 import contextlib
 import sys
 import typing
-import weakref
 from collections import defaultdict
 from dataclasses import InitVar, dataclass, field, replace
 from pathlib import Path
@@ -26,7 +25,6 @@ from urllib.parse import urlparse
 import orjson
 from aiolimiter import AsyncLimiter
 from curl_cffi import (
-    AsyncSession,
     BrowserTypeLiteral,
     CurlHttpVersion,
     CurlOpt,
@@ -41,6 +39,7 @@ from rich.progress import (
     TaskID,
 )
 
+from hydrastream._curl_shim import AsyncSession
 from hydrastream.exceptions import (
     InvalidChecksumError,
     OrphanedChunkError,
@@ -104,17 +103,14 @@ class Chunk:
     current_pos: int
     start: int = field(compare=False)
     end: int = field(compare=False)
-    _file_ref: weakref.ReferenceType[File] | None = field(
-        repr=False, compare=False, default=None
-    )
+    _file: File | None = field(repr=False, compare=False, default=None)
 
     @property
     def file(self) -> File:
-        obj = self._file_ref() if self._file_ref else None
-        if obj is None:
+        if self._file is None:
             # Выбрасываем структурированную ошибку вместо безликого RuntimeError
             raise OrphanedChunkError(start_pos=self.start, end_pos=self.end)
-        return obj
+        return self._file
 
     @property
     def is_finished(self) -> bool:
@@ -223,7 +219,7 @@ class File:
                     if not self.meta.content_length
                     else self.meta.content_length - 1,
                     current_pos=0,
-                    _file_ref=weakref.ref(self),
+                    _file=self,
                 )
             )
             return
@@ -240,7 +236,7 @@ class File:
                     start=start,
                     end=end,
                     current_pos=start,
-                    _file_ref=weakref.ref(self),
+                    _file=self,
                 )
             )
 
@@ -268,20 +264,28 @@ class File:
 
     @classmethod
     def from_json(cls, content: bytes) -> Self:
-        data = orjson.loads(content)
-        meta = data.pop("meta")
-        checksum_data = meta.get("expected_checksum")
+        data: dict[str, Any] = orjson.loads(content)
+        meta: dict[str, Any] = data.pop("meta")
+        checksum_data: dict[str, TypeHash] | None = meta.pop("expected_checksum")
         if isinstance(checksum_data, dict):
-            meta["expected_checksum"] = Checksum(**checksum_data)
+            meta["expected_checksum"] = Checksum(
+                algorithm=checksum_data.pop("algorithm"),
+                value=checksum_data.pop("value"),
+            )
+        file_meta = FileMeta(**meta)
 
-        meta = FileMeta(**meta)
         chunks_data = data.pop("chunks", [])
 
-        file_obj = cls(meta=meta, **data)
+        file_obj = cls(meta=file_meta, **data)
 
-        # Восстанавливаем weakref ПОСЛЕ создания File
         file_obj.chunks = [
-            Chunk(**{**c, "_file_ref": weakref.ref(file_obj)}) for c in chunks_data
+            Chunk(
+                current_pos=c["current_pos"],
+                start=c["start"],
+                end=c["end"],
+                _file=file_obj,
+            )
+            for c in chunks_data
         ]
         return file_obj
 
@@ -475,15 +479,25 @@ def validate_speed_limit(value: float | None) -> None:
         )
 
 
-def validate_positive_int(param_name: str, value: int | None) -> None:
+def validate_positive_int(param_name: str, value: int | None, min: int = 0) -> None:
     if value is None:
         return
 
-    if value <= 0:
+    if min > 0:
+        if value < min:
+            raise ValidationError(
+                param=param_name,
+                value=value,
+                reason=f"Value must be a positive integer (greater than {min}).",
+            )
+
+        return
+
+    if value <= min:
         raise ValidationError(
             param=param_name,
             value=value,
-            reason="Value must be a positive integer (greater than 0).",
+            reason=f"Value must be a positive integer (greater than {min}).",
         )
 
 
@@ -568,7 +582,7 @@ class HydraConfig:
         validate_speed_limit(self.speed_limit)
         validate_positive_int("min_chunk_size_mb", min_chunk_size_mb)
         validate_positive_int("max_stream_chunk_size_mb", max_stream_chunk_size_mb)
-        validate_positive_int("stream_buffer_size_mb", stream_buffer_size_mb)
+        validate_positive_int("stream_buffer_size_mb", stream_buffer_size_mb, 50)
         validate_browser(self.impersonate)
 
         object.__setattr__(self, "MIN_CHUNK", min_chunk_size_mb * 1024**2)
@@ -581,7 +595,7 @@ class HydraConfig:
             )
         else:
             object.__setattr__(
-                self, "STREAM_BUFFER_SIZE", self.STREAM_CHUNK_SIZE * self.threads * 2
+                self, "STREAM_BUFFER_SIZE", self.STREAM_CHUNK_SIZE * self.threads
             )
 
 
@@ -597,8 +611,8 @@ class QueueSet:
     chunk: asyncio.PriorityQueue[tuple[int, Chunk] | tuple[Chunk, int]] = field(
         default_factory=asyncio.PriorityQueue[tuple[int, Chunk] | tuple[Chunk, int]]
     )
-    stream: asyncio.Queue[tuple[int, bytearray]] = field(
-        default_factory=asyncio.Queue[tuple[int, bytearray]]
+    stream: asyncio.Queue[tuple[int, bytes]] = field(
+        default_factory=asyncio.Queue[tuple[int, bytes]]
     )
 
 
@@ -638,9 +652,7 @@ class HydraContext:
     current_files_id: set[int] = field(default_factory=set[int])
     active_stream: set[Response] = field(default_factory=set[Response])
     files: dict[int, File] = field(default_factory=dict[int, File])
-    heap: list[tuple[int, bytearray]] = field(
-        default_factory=list[tuple[int, bytearray]]
-    )
+    heap: list[tuple[int, bytes]] = field(default_factory=list[tuple[int, bytes]])
 
     # Вложенные домены
     queues: QueueSet = field(default_factory=QueueSet)

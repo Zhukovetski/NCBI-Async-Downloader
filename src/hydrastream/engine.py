@@ -9,7 +9,6 @@ import math
 import random
 import signal
 import sys
-from _hashlib import HASH
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from typing import TypeVarTuple, Unpack
@@ -25,6 +24,7 @@ from hydrastream.exceptions import (
     HashMismatchError,
     LogStatus,
 )
+from hydrastream.interfaces import Hasher
 from hydrastream.models import Checksum, HydraContext, TypeHash
 from hydrastream.monitor import done, log, print_dry_run_report, ui_start, ui_stop
 
@@ -76,31 +76,30 @@ async def stop(ctx: HydraContext, complete: bool = False) -> None:
 
         if ctx.stream:
             with contextlib.suppress(asyncio.QueueFull):
-                ctx.queues.stream.put_nowait((-1, bytearray()))
+                ctx.queues.stream.put_nowait((-1, b""))
                 ctx.queues.file_discovery.put_nowait(-1)
 
 
-async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[memoryview]:
+async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[bytes]:
     file_obj = ctx.files[file_id]
     total_size = file_obj.meta.content_length
 
     checksum = file_obj.meta.expected_checksum
-    hasher = hashlib.new(checksum.algorithm) if checksum else None
+    hasher: Hasher | None = hashlib.new(checksum.algorithm) if checksum else None
 
     ctx.next_offset = 0
     await log(ctx.ui, f"Streaming: {file_obj.meta.filename}", status=LogStatus.INFO)
     try:
         while ctx.next_offset < total_size:
             if ctx.heap and ctx.heap[0][0] == ctx.next_offset:
-                _, chunk_data = heapq.heappop(ctx.heap)
-                view = memoryview(chunk_data)
+                _, data = heapq.heappop(ctx.heap)
 
                 if hasher:
-                    hasher.update(view)
+                    hasher.update(data)
 
-                yield view
+                yield data
 
-                length = len(view)
+                length = len(data)
                 ctx.next_offset += length
 
                 async with ctx.sync.chunk_from_future:
@@ -108,25 +107,24 @@ async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[memoryv
 
                 continue
 
-            chunk_start, chunk_data = await ctx.queues.stream.get()
+            chunk_start, data = await ctx.queues.stream.get()
 
             if chunk_start == -1:
                 break
 
             if chunk_start == ctx.next_offset:
-                view = memoryview(chunk_data)
                 if hasher:
-                    hasher.update(view)
+                    hasher.update(data)
 
-                yield view
+                yield data
 
-                length = len(view)
+                length = len(data)
                 ctx.next_offset += length
                 async with ctx.sync.chunk_from_future:
                     ctx.sync.chunk_from_future.notify_all()
 
             else:
-                heapq.heappush(ctx.heap, (chunk_start, chunk_data))
+                heapq.heappush(ctx.heap, (chunk_start, data))
         else:
             await done(ctx.ui, file_obj.meta.filename)
 
@@ -254,7 +252,7 @@ async def stream_all(
     ctx: HydraContext,
     links: list[str],
     expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None,
-) -> AsyncGenerator[tuple[str, AsyncGenerator[memoryview]]]:
+) -> AsyncGenerator[tuple[str, AsyncGenerator[bytes]]]:
     ctx.stream = True
     loop = asyncio.get_running_loop()
     await prepare_runtime(ctx, loop)
@@ -329,7 +327,7 @@ async def run_downloads(
 
 
 def verify_stream(
-    hasher: HASH,
+    hasher: Hasher,
     filename: str,
     expected_checksum: Checksum,
     next_offset: int,

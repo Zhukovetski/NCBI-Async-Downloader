@@ -6,7 +6,7 @@ import sys
 import tomllib
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, TypeVar
 
 import typer
 from curl_cffi import BrowserTypeLiteral
@@ -74,7 +74,7 @@ async def async_main(  # noqa: C901, PLR0912
     input_file: str | None,
     stream: bool,
     typehash: TypeHash,
-    hash: str | None,
+    checksum: str | None,
     output_dir: str,
     dry_run: bool,
     no_ui: bool,
@@ -97,13 +97,13 @@ async def async_main(  # noqa: C901, PLR0912
         input_file: Path to a text file containing URLs, or '-' for stdin.
         stream: Whether to stream data to stdout instead of writing to disk.
         typehash: Hash algorithm type (e.g., md5, sha256).
-        hash: Expected hash checksum (only evaluated if a single valid link is provided).
+        checksum: Expected checksum checksum (only evaluated if a single valid link is provided).
         output_dir: Destination directory for downloaded files.
         dry_run: Simulate the download process (metadata fetch only).
         no_ui: Disable GUI (plain text logs only) if set to True.
         quiet: Dead silence mode. No console output at all if set to True.
         json_logs: Output logs in structured JSON Lines format.
-        verify: Enable or disable post-download hash verification.
+        verify: Enable or disable post-download checksum verification.
         threads: Maximum number of concurrent download connections.
         min_chunk_size_mb: Minimum chunk size in MB for disk mode.
         max_stream_chunk_size_mb: Target chunk size in MB for stream mode.
@@ -128,14 +128,14 @@ async def async_main(  # noqa: C901, PLR0912
 
         expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] = {}
 
-        # Hash logic: only map the hash if a single URL is provided
-        if hash and links and len(links) == 1:
-            expected_checksums[links[0]] = Checksum(algorithm=typehash, value=hash)
-        elif hash and links and len(links) > 1:
+        # Hash logic: only map the checksum if a single URL is provided
+        if checksum and links and len(links) == 1:
+            expected_checksums[links[0]] = Checksum(algorithm=typehash, value=checksum)
+        elif checksum and links and len(links) > 1:
             raise ValidationError(
-                param="hash",
+                param="checksum",
                 reason=(
-                    "Warning: The --hash flag is ignored when "
+                    "Warning: The --checksum flag is ignored when "
                     "multiple URLs are provided."
                 ),
             )
@@ -194,7 +194,7 @@ async def async_main(  # noqa: C901, PLR0912
                                 param="stream",
                                 reason=(
                                     "Proceeding in 'Verification Only' mode "
-                                    "since --hash is provided."
+                                    "since --checksum is provided."
                                 ),
                             ),
                         )
@@ -224,7 +224,7 @@ async def async_main(  # noqa: C901, PLR0912
 
         all_errors = flatten_exceptions(e)
 
-        codes = []
+        codes: list[int] = []
         for err in all_errors:
             if isinstance(err, HydraError):
                 await report(ui, err)
@@ -239,12 +239,17 @@ async def async_main(  # noqa: C901, PLR0912
         await log_stop(ui)
 
 
+T = TypeVar("T", bound=BaseException)
+
+
 def flatten_exceptions(e: BaseException) -> list[BaseException]:
     """Разворачивает BaseExceptionGroup в плоский список ошибок."""
     if isinstance(e, BaseExceptionGroup):
-        result = []
-        for child in e.exceptions:
-            result.extend(flatten_exceptions(child))
+        result: list[BaseException] = []
+        # Pyright bug: .exceptions is typed
+        # as tuple[Unknown | BaseExceptionGroup[Unknown], ...]
+        for child in e.exceptions:  # type: ignore[reportUnknownVariableType]
+            result.extend(flatten_exceptions(child))  # type: ignore[reportUnknownVariableType]
         return result
     return [e]
 
@@ -280,12 +285,12 @@ def cli(
             default_factory=partial(get_cfg, "typehash", "md5"),
         ),
     ],
-    hash: Annotated[
+    checksum: Annotated[
         str | None,
         typer.Option(
-            "--hash",
-            help="Expected hash checksum (applicable only for a single URL).",
-            default_factory=partial(get_cfg, "hash"),
+            "--checksum",
+            help="Expected checksum checksum (applicable only for a single URL).",
+            default_factory=partial(get_cfg, "checksum"),
         ),
     ],
     output_dir: Annotated[
@@ -390,7 +395,7 @@ def cli(
         typer.Option(
             "--verify/--no-verify",
             "-V/-N",
-            help="Verify the downloaded file hash. Use --no-verify to skip check.",
+            help="Verify the downloaded file checksum. Use --no-verify to skip check.",
             default_factory=partial(get_cfg, "verify", True),
         ),
     ],
@@ -427,7 +432,7 @@ def cli(
             input_file=input_file,
             stream=stream,
             typehash=typehash,
-            hash=hash,
+            checksum=checksum,
             threads=threads,
             dry_run=dry_run,
             min_chunk_size_mb=min_chunk_size_mb,
