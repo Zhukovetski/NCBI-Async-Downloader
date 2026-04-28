@@ -220,7 +220,7 @@ class Checksum(BaseModel):
 @my_dataclass(frozen=True)
 class FileMeta:
     id: int
-    filename: str
+    original_filename: str
     url: str
     content_length: int
     expected_checksum: Checksum | None = field(default=None)
@@ -230,11 +230,13 @@ class FileMeta:
 @my_dataclass
 class File:
     meta: FileMeta
+    actual_filename: str = ""
     chunk_size: int
     chunks: list[Chunk] = field(default_factory=list[Chunk])
     fd: int | None = field(default=None, repr=False)
     verified: bool = field(default=False)
     is_failed: bool = field(default=False)
+    _stream_queue: asyncio.Queue[Envelope[StreamChunk | None]] | None = None
 
     def create_chunks(self) -> None:
         if self.chunks:
@@ -375,7 +377,6 @@ class SpeedLimiterState:
     last_checkpoint_time: float = 0.0
     target_time: float = 0.0
 
-    limit_event: asyncio.Event = field(default_factory=asyncio.Event)
     controller_checkpoint_event: asyncio.Event = field(default_factory=asyncio.Event)
     throttler_checkpoint_event: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -387,7 +388,6 @@ class SpeedLimiterState:
             self.target_time = self.bytes_to_check / self.speed_limit
         else:
             self.bytes_to_check = 5 * 1024**2
-        self.limit_event.set()
 
 
 @my_dataclass

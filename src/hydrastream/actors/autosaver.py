@@ -3,34 +3,56 @@
 
 import asyncio
 
+from hydrastream.actors.file_registrator import GetSnapshotCmd
 from hydrastream.exceptions import LogStatus
-from hydrastream.models import Envelope, File, HydraContext
+from hydrastream.interfaces import StorageBackend
+from hydrastream.models import Envelope, File, UIState, WriteChunk, my_dataclass
 from hydrastream.monitor import log
 
 
-async def autosaver(ctx: HydraContext, interval: float) -> None:
-    loop = asyncio.get_running_loop()
+@my_dataclass
+class FileAutosaver:
+    all_complete: asyncio.Event
+    flush_event: asyncio.Event
+    disk_q: asyncio.PriorityQueue[Envelope[WriteChunk | None]]
+    reg_events_q: asyncio.Queue[object]
+    get_shapshot: asyncio.Queue[dict[int, File]]
+    fs: StorageBackend
+    ui: UIState
 
-    while not ctx.sync.all_complete.is_set():
-        try:
-            async with asyncio.timeout(interval):
-                await ctx.sync.all_complete.wait()
-            break
-        except TimeoutError:
+    is_debug: bool
+
+    async def run(self, interval: float) -> None:
+        loop = asyncio.get_running_loop()
+
+        while not self.all_complete.is_set():
             try:
-                ctx.sync.flush_event.clear()
-                await ctx.queues.disk.put(Envelope(sort_key=(-1,), msg=True))
-                await ctx.sync.flush_event.wait()
-                await loop.run_in_executor(None, save_all_states, ctx, ctx.files)
-            except Exception as e:
-                if ctx.config.debug:
-                    raise
-                await log(
-                    ctx.ui, f"Auto-save operation failed: {e}", status=LogStatus.ERROR
-                )
+                async with asyncio.timeout(interval):
+                    await self.all_complete.wait()
+                break
+            except TimeoutError:
+                try:
+                    self.flush_event.clear()
+                    await self.disk_q.put(Envelope(sort_key=(-1,), msg=True))
+                    await self.reg_events_q.put(
+                        GetSnapshotCmd(reply_to=self.get_shapshot)
+                    )
+                    files = await self.get_shapshot.get()
+                    await self.flush_event.wait()
+                    await loop.run_in_executor(None, self.save_all_states, files)
 
+                except Exception as e:
+                    if self.is_debug:
+                        raise
+                    await log(
+                        self.ui,
+                        f"Auto-save operation failed: {e}",
+                        status=LogStatus.ERROR,
+                    )
 
-def save_all_states(ctx: HydraContext, files: dict[int, File]) -> None:
-    for file in list(files.values()):
-        if file.chunks and not all(c.current_pos > c.end for c in (file.chunks or [])):
-            ctx.fs.save_state(file)
+    def save_all_states(self, files: dict[int, File]) -> None:
+        for file in list(files.values()):
+            if file.chunks and not all(
+                c.current_pos > c.end for c in (file.chunks or [])
+            ):
+                self.fs.save_state(file)

@@ -205,21 +205,6 @@ async def log_worker(ctx: UIState) -> None:
             break
 
 
-async def speed_limiter(ctx: UIState) -> None:
-    prev = 0
-    time = ctx.speed.time_speed_limit
-    if ctx.speed.speed_limit is None:
-        return
-    while ctx.is_running:
-        d_time = (ctx.progress.download_bytes - prev) / (ctx.speed.speed_limit)
-        if d_time > 1:
-            ctx.speed.limit_event.clear()
-            await asyncio.sleep(ctx.speed.time_speed_limit * d_time)
-            ctx.speed.limit_event.set()
-        prev = ctx.progress.download_bytes
-        await asyncio.sleep(time)
-
-
 def add_file(ctx: UIState, filename: str, total_size: int | None = None) -> None:
     if total_size is not None:
         ctx.progress.total_bytes += total_size
@@ -248,6 +233,12 @@ def update(ctx: UIState, filename: str, advance_bytes: int) -> None:
 
         ctx.speed.controller_checkpoint_event.set()
         ctx.speed.throttler_checkpoint_event.set()
+
+
+def update_filename(ctx: UIState, old_filename: str, new_filename: str) -> None:
+    if ctx.rich.progress:
+        ctx.rich.progress.update(ctx.rich.tasks[old_filename], description=new_filename)
+        ctx.rich.tasks[new_filename] = ctx.rich.tasks.pop(old_filename)
 
 
 async def refresh_loop(ctx: UIState) -> None:
@@ -412,7 +403,7 @@ async def print_dry_run_report(
             "total_bytes": ctx.progress.total_bytes,
             "files": [
                 {
-                    "filename": f.meta.filename,
+                    "filename": f.actual_filename,
                     "size_bytes": f.meta.content_length,
                     "chunks": len(f.chunks),
                     "supports_ranges": f.meta.supports_ranges,
@@ -466,14 +457,16 @@ async def print_dry_run_report(
 
         if ctx.display.verify:
             table.add_row(
-                f.meta.filename,
+                f.meta.original_filename,
                 str_size,
                 str(len(f.chunks)),
                 "✅" if f.meta.expected_checksum else "❌",
                 ranges,
             )
         else:
-            table.add_row(f.meta.filename, str_size, str(len(f.chunks)), ranges)
+            table.add_row(
+                f.meta.original_filename, str_size, str(len(f.chunks)), ranges
+            )
     # Печатаем таблицу в stderr (чтобы не сломать пайпы)
     ctx.rich.console.print(table)
     if not stream:

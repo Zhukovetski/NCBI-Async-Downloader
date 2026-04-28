@@ -157,7 +157,7 @@ class LocalStorageManager:
         filepath.unlink(missing_ok=True)
 
     def save_state(self, file_obj: File) -> None:
-        filename = file_obj.meta.filename
+        filename = file_obj.actual_filename
         path = Path(self.get_state_path(filename))
         temp_dir = path.parent
         temp_dir.mkdir(parents=True, exist_ok=True)
@@ -224,7 +224,7 @@ class LocalStorageManager:
         if not file:
             return None, len(found_states)
 
-        if (self.output_dir / file.meta.filename).is_file():
+        if (self.output_dir / file.meta.original_filename).is_file():
             return file, len(found_states)
         return None, len(found_states)
 

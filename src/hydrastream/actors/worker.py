@@ -2,10 +2,8 @@
 # Licensed under the MIT License.
 
 import asyncio
-import contextlib
 import os
 import random
-import sys
 import traceback
 
 from curl_cffi import Response
@@ -13,6 +11,9 @@ from curl_cffi.requests import RequestsError
 
 from hydrastream._curl_shim import aiter_bytes, get_error_response
 from hydrastream.actors.controller import MaxLimitSignal, NetworkCongestionSignal
+from hydrastream.actors.dispatcher import FileCompleted
+from hydrastream.actors.file_registrator import RemoveFileCmd
+from hydrastream.actors.throttler import RegisterStreamCmd, RemoveStreamCmd
 from hydrastream.engine import send_poison_pills
 from hydrastream.exceptions import (
     DownloadFailedError,
@@ -36,14 +37,19 @@ from hydrastream.network import stream_chunk, try_scale_up
 
 @my_dataclass
 class DownloadWorker:
-    inbox_dispather: asyncio.PriorityQueue[Envelope[Chunk | None]]
-    outbox_stream: asyncio.PriorityQueue[Envelope[StreamChunk | None]]
-    outbox_disk: asyncio.PriorityQueue[Envelope[WriteChunk | None]]
+    chunks_q: asyncio.PriorityQueue[Envelope[Chunk | None]]
+    stream_chunks_q: asyncio.Queue[Envelope[StreamChunk | None]]
+    disk_q: asyncio.Queue[Envelope[WriteChunk | None]]
+    controller_q: asyncio.Queue[object]
+    file_discovery: asyncio.Queue[int]
+    throttler_q: asyncio.Queue[object]
+    reg_events_q: asyncio.Queue[object]
+    file_limit_q: asyncio.Queue[object]
+
     wakeup_event: asyncio.Event
+    all_complete: asyncio.Event
 
     num_writers: int
-
-    all_complete: asyncio.Event
 
     is_dry_run: bool
     is_stream: bool
@@ -69,7 +75,7 @@ class DownloadWorker:
                 if not chunk.is_finished:
                     await log(
                         self.ui,
-                        f"Truncated read for {chunk.file.meta.filename}. "
+                        f"Truncated read for {chunk.file.actual_filename}. "
                         f"Requeuing remaining {chunk.remaining} bytes.",
                         status=LogStatus.WARNING,
                         throttle_key="truncated_read",
@@ -82,22 +88,18 @@ class DownloadWorker:
                 await self.handle_worker_error(envelope, chunk, e)
 
     async def get_chunk(self) -> tuple[Envelope[Chunk | None] | None, Chunk | None]:
-        envelope = await self.inbox_dispather.get()
+        envelope = await self.chunks_q.get()
 
         if envelope.is_poison_pill:
-            if not self.sync.stop_adaptive_controller.is_set():
-                self.sync.stop_adaptive_controller.set()
-                self.ui.speed.controller_checkpoint_event.set()
-                self.dynamic_limit = sys.maxsize
-                await self.controller_outbox.put(MaxLimitSignal())
+            await self.controller_q.put(MaxLimitSignal())
 
             if envelope.is_last_survivor:
                 if self.is_stream:
-                    await self.queues.file_discovery.put(-1)
+                    await self.file_discovery.put(-1)
 
                 self.all_complete.set()
                 self.ui.speed.throttler_checkpoint_event.set()
-                await send_poison_pills(self.outbox_disk, self.num_writers)
+                await send_poison_pills(self.disk_q, self.num_writers)
 
             return None, None
 
@@ -114,13 +116,13 @@ class DownloadWorker:
         self, envelope: Envelope[Chunk | None], chunk: Chunk, e: Exception
     ) -> None:
         if isinstance(e, WorkerScaleDown):
-            await self.inbox_dispather.put(envelope)
+            await self.chunks_q.put(envelope)
             return
 
         if isinstance(e, RequestsError):
             await self._handle_requests_error(envelope, chunk, e)
             self.dynamic_limit = max(self.dynamic_limit - 1, 1)
-            await self.controller_outbox.put(NetworkCongestionSignal())
+            await self.controller_q.put(NetworkCongestionSignal())
             return
 
         if isinstance(e, TimeoutError):
@@ -157,12 +159,12 @@ class DownloadWorker:
         if status in {400, 401, 403, 404, 410, 416}:
             await log(
                 self.ui,
-                f"Chunk for {chunk.file.meta.filename} "
+                f"Chunk for {chunk.file.actual_filename} "
                 f"failed permanently (HTTP {status}).",
                 status=LogStatus.ERROR,
             )
             chunk.file.is_failed = True
-            self.fs.delete_file(chunk.file.meta.filename)
+            self.fs.delete_file(chunk.file.actual_filename)
 
             if self.is_stream:
                 raise DownloadFailedError(
@@ -185,18 +187,18 @@ class DownloadWorker:
         if not supports_ranges:
             if self.is_stream:
                 raise StreamError(
-                    url=chunk.file.meta.url, filename=chunk.file.meta.filename
+                    url=chunk.file.meta.url, filename=chunk.file.actual_filename
                 )
             await log(
                 self.ui,
-                f"Connection dropped for {chunk.file.meta.filename}. "
+                f"Connection dropped for {chunk.file.actual_filename}. "
                 f"Server does not support resume. Restarting download from 0 bytes.",
                 status=LogStatus.WARNING,
             )
 
             downloaded_so_far = chunk.current_pos - chunk.start
             if downloaded_so_far > 0:
-                update(self.ui, chunk.file.meta.filename, -downloaded_so_far)
+                update(self.ui, chunk.file.actual_filename, -downloaded_so_far)
 
             chunk.current_pos = chunk.start
 
@@ -211,7 +213,7 @@ class DownloadWorker:
                     await loop.run_in_executor(
                         None, os.ftruncate, fd, file_obj.meta.content_length
                     )
-        await self.inbox_dispather.put(envelope)
+        await self.chunks_q.put(envelope)
         delay = random.uniform(*delay_range)
         await asyncio.sleep(delay)
 
@@ -226,7 +228,7 @@ class DownloadWorker:
         if not self.is_stream:
             await self.disk_process_chunk(chunk, headers)
         else:
-            await self.is_stream_process_chunk(chunk, headers)
+            await self.stream_process_chunk(chunk, headers)
 
     async def disk_process_chunk(
         self,
@@ -239,7 +241,7 @@ class DownloadWorker:
         fd = chunk.file.fd
 
         if fd is None:
-            fd = self.fs.open_file(chunk.file.meta.filename)
+            fd = self.fs.open_file(chunk.file.actual_filename)
         buffer_size = 1_048_576
         async with stream_chunk(
             self.net,
@@ -247,7 +249,7 @@ class DownloadWorker:
             headers=headers,
         ) as r:
             try:
-                self.active_stream.add(r)
+                await self.throttler_q.put(RegisterStreamCmd(stream=r))
                 bytes_to_read = chunk.end - chunk.current_pos + 1
 
                 async for data in aiter_bytes(r, chunk_size=131072):
@@ -258,10 +260,10 @@ class DownloadWorker:
                     current_buffer_size += len(data)
 
                     bytes_to_read -= len(data)
-                    update(self.ui, chunk.file.meta.filename, len(data))
+                    update(self.ui, chunk.file.actual_filename, len(data))
 
                     if current_buffer_size >= buffer_size:
-                        await self.outbox_disk.put(
+                        await self.disk_q.put(
                             Envelope(
                                 sort_key=(fd, chunk.current_pos),
                                 payload=WriteChunk(
@@ -282,24 +284,23 @@ class DownloadWorker:
                     if bytes_to_read <= 0:
                         break
 
-                    if not self.dynamic_limit_event.is_set():
+                    if not self.wakeup_event.is_set():
                         raise WorkerScaleDown
 
             finally:
-                self.active_stream.remove(r)
+                await self.throttler_q.put(RemoveStreamCmd(stream=r))
                 if buffer_list:
-                    with contextlib.suppress(asyncio.QueueFull):
-                        self.outbox_disk.put_nowait(
-                            Envelope(
-                                sort_key=(fd, chunk.current_pos),
-                                payload=WriteChunk(
-                                    fd=fd,
-                                    offset=chunk.current_pos,
-                                    length=current_buffer_size,
-                                    data=buffer_list,
-                                ),
-                            )
+                    await self.disk_q.put(
+                        Envelope(
+                            sort_key=(fd, chunk.current_pos),
+                            payload=WriteChunk(
+                                fd=fd,
+                                offset=chunk.current_pos,
+                                length=current_buffer_size,
+                                data=buffer_list,
+                            ),
                         )
+                    )
 
     async def stream_process_chunk(
         self,
@@ -313,7 +314,7 @@ class DownloadWorker:
             headers=headers,
         ) as r:
             try:
-                self.active_stream.add(r)
+                await self.throttler_q.put(RegisterStreamCmd(stream=r))
                 bytes_to_read = chunk.end - chunk.current_pos + 1
 
                 async for data in aiter_bytes(r, chunk_size=131072):
@@ -321,9 +322,9 @@ class DownloadWorker:
                         data = data[:bytes_to_read]  # noqa: PLW2901
 
                     bytes_to_read -= len(data)
-                    update(self.ui, chunk.file.meta.filename, len(data))
+                    update(self.ui, chunk.file.actual_filename, len(data))
 
-                    await self.queues.stream.put(
+                    await self.stream_chunks_q.put(
                         Envelope(
                             sort_key=(chunk.current_pos,),
                             payload=StreamChunk(start=chunk.current_pos, data=data),
@@ -331,14 +332,14 @@ class DownloadWorker:
                     )
                     chunk.current_pos = chunk.current_pos + len(data)
 
-                    if not self.dynamic_limit_event.is_set():
+                    if not self.wakeup_event.is_set():
                         raise WorkerScaleDown
 
                     if bytes_to_read <= 0:
                         break
 
             finally:
-                self.active_stream.remove(r)
+                await self.throttler_q.put(RemoveStreamCmd(stream=r))
 
     async def file_done(
         self,
@@ -347,7 +348,7 @@ class DownloadWorker:
         if self.is_stream:
             return
 
-        filename = chunk.file.meta.filename
+        filename = chunk.file.actual_filename
         file_obj = chunk.file
         if chunk.file.meta.content_length:
             if chunk.file.verified or not chunk.file.is_complete:
@@ -358,23 +359,21 @@ class DownloadWorker:
         if file_obj.meta.expected_checksum:
             await log(
                 self.ui,
-                f"Verifying Hash checksum for {chunk.file.meta.filename}...",
+                f"Verifying Hash checksum for {chunk.file.actual_filename}...",
                 status=LogStatus.INFO,
             )
             await self.fs.verify_file_hash(
-                file_obj.meta.filename,
+                file_obj.actual_filename,
                 file_obj.meta.expected_checksum.value,
                 file_obj.meta.expected_checksum.algorithm,
             )
             await log(
                 self.ui,
-                f"Integrity confirmed: {chunk.file.meta.filename}",
+                f"Integrity confirmed: {chunk.file.actual_filename}",
                 status=LogStatus.SUCCESS,
             )
         self.fs.close_file(fd_or_conn=file_obj.fd)
         self.fs.delete_state(filename)
         await done(self.ui, filename)
-        del self.files[chunk.file.meta.id]
-        self.current_files_id.remove(chunk.file.meta.id)
-        async with self.sync.current_files:
-            self.sync.current_files.notify_all()
+        await self.reg_events_q.put(RemoveFileCmd(file_id=chunk.file.meta.id))
+        await self.file_limit_q.put(FileCompleted())

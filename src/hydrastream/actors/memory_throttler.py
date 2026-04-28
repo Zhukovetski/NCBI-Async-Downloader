@@ -8,7 +8,7 @@ from hydrastream.models import Chunk, Envelope, my_dataclass
 class MemoryThrottler:
     chunk_inbox: asyncio.PriorityQueue[Envelope[Chunk | None]]
     credit_inbox: asyncio.Queue[int]
-    worker_outbox: asyncio.PriorityQueue[Envelope[Chunk | None]]
+    chunk_outbox: asyncio.PriorityQueue[Envelope[Chunk | None]]
 
     budget: int = 50 * 1024 * 1024
 
@@ -24,7 +24,7 @@ class MemoryThrottler:
 
                 # Обработка пилюли (прокидываем воркерам и выходим)
                 if pending_chunk.is_poison_pill:
-                    await send_poison_pills(self.worker_outbox, self.num_workers)
+                    await send_poison_pills(self.chunk_outbox, self.num_workers)
                     break
 
             if not pending_chunk.payload:
@@ -38,7 +38,7 @@ class MemoryThrottler:
 
             # 3. ДЕНЬГИ ЕСТЬ! Отдаем чанк воркерам
             self.budget -= pending_chunk.payload.size
-            await self.worker_outbox.put(pending_chunk)
+            await self.chunk_outbox.put(pending_chunk)
 
             # Освобождаем руки для следующего чанка
             pending_chunk = None

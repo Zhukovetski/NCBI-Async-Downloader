@@ -1,84 +1,104 @@
+import asyncio
 import hashlib
-import heapq
 from collections.abc import AsyncGenerator
 
+from hydrastream.actors.dispatcher import FileCompleted
+from hydrastream.actors.file_registrator import RemoveFileCmd
 from hydrastream.exceptions import FileSizeMismatchError, HashMismatchError, LogStatus
 from hydrastream.interfaces import Hasher
-from hydrastream.models import Checksum, HydraContext
+from hydrastream.models import (
+    Checksum,
+    Envelope,
+    File,
+    StreamChunk,
+    UIState,
+)
 from hydrastream.monitor import done, log
 
 
-async def streamer(ctx: HydraContext, file_id: int) -> AsyncGenerator[bytes]:
-    file_obj = ctx.files[file_id]
-    total_size = file_obj.meta.content_length
+async def streamer(
+    file_obj: File,
+    stream_chunk_inbox: asyncio.Queue[Envelope[StreamChunk | None]],
+    credit_outbox: asyncio.Queue[int],
+    reg_events_q: asyncio.Queue[object],
+    file_limit_q: asyncio.Queue[object],
+    ui: UIState,
+) -> AsyncGenerator[bytes, None]:
 
+    total_size = file_obj.meta.content_length
     checksum = file_obj.meta.expected_checksum
     hasher: Hasher | None = hashlib.new(checksum.algorithm) if checksum else None
 
-    ctx.next_offset = 0
-    await log(ctx.ui, f"Streaming: {file_obj.meta.filename}", status=LogStatus.INFO)
+    buffer: dict[int, bytes] = {}
+    expected_offset = 0
+
+    await log(ui, f"Streaming: {file_obj.actual_filename}", status=LogStatus.INFO)
+
     try:
-        while ctx.next_offset < total_size:
-            if ctx.heap and ctx.heap[0].start == ctx.next_offset:
-                chunk = heapq.heappop(ctx.heap)
-
-                if hasher:
-                    hasher.update(chunk.data)
-
-                yield chunk.data
-
-                ctx.next_offset += len(chunk.data)
-
-                async with ctx.sync.chunk_from_future:
-                    ctx.sync.chunk_from_future.notify_all()
-
-                continue
-
-            envelope = await ctx.queues.stream.get()
+        while expected_offset < total_size:
+            envelope = await stream_chunk_inbox.get()
 
             if envelope.is_poison_pill:
                 break
-            if not (chunk := envelope.payload):
+
+            if not (stream_chunk := envelope.payload):
                 continue
 
-            if chunk.start == ctx.next_offset:
+            chunk_offset = stream_chunk.start
+            chunk_data = stream_chunk.data
+
+            if chunk_offset == expected_offset:
+                # 1. ОБНОВЛЯЕМ ХЭШ!
                 if hasher:
-                    hasher.update(chunk.data)
+                    hasher.update(chunk_data)
 
-                yield chunk.data
+                yield chunk_data
+                expected_offset += len(chunk_data)
+                await credit_outbox.put(len(chunk_data))
 
-                ctx.next_offset += len(chunk.data)
+                # Цепная реакция из буфера
+                while expected_offset in buffer:
+                    next_data = buffer.pop(expected_offset)
 
-                async with ctx.sync.chunk_from_future:
-                    ctx.sync.chunk_from_future.notify_all()
+                    # ОБНОВЛЯЕМ ХЭШ ДЛЯ ДАННЫХ ИЗ БУФЕРА!
+                    if hasher:
+                        hasher.update(next_data)
 
+                    yield next_data
+                    expected_offset += len(next_data)
+                    await credit_outbox.put(len(next_data))
             else:
-                heapq.heappush(ctx.heap, chunk)
-        else:
-            await done(ctx.ui, file_obj.meta.filename)
+                # Данные из будущего - просто кладем в буфер
+                buffer[chunk_offset] = chunk_data
 
+        else:
+            # Успешное завершение цикла (все байты получены)
             if hasher and checksum:
                 try:
                     verify_stream(
                         hasher,
-                        file_obj.meta.filename,
+                        file_obj.actual_filename,
                         checksum,
-                        ctx.next_offset,
+                        expected_offset,
                         total_size,
                     )
                     await log(
-                        ctx.ui, "Hash Verified", status=LogStatus.SUCCESS, progress=True
+                        ui, "Hash Verified", status=LogStatus.SUCCESS, progress=True
                     )
                 except Exception as e:
-                    await log(ctx.ui, str(e), status=LogStatus.ERROR)
+                    await log(ui, str(e), status=LogStatus.ERROR)
                     raise
 
+            # Вызываем done ТОЛЬКО при успехе
+            await done(ui, file_obj.actual_filename)
+
     finally:
-        ctx.heap.clear()
-        del ctx.files[file_id]
-        ctx.current_files_id.remove(file_id)
-        async with ctx.sync.current_files:
-            ctx.sync.current_files.notify()
+        # В finally оставляем ТОЛЬКО очистку ресурсов!
+        buffer.clear()
+
+        # Сигнализируем системе, что файл отработан (освобождаем лимиты)
+        await reg_events_q.put(RemoveFileCmd(file_id=file_obj.meta.id))
+        await file_limit_q.put(FileCompleted())
 
 
 def verify_stream(

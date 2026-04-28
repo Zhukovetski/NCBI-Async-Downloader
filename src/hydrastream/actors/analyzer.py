@@ -23,10 +23,10 @@ class TelemetryAnalyzer:
 
     ui: UIState
 
-    all_complete: asyncio.Event
+    stop_analyzer: asyncio.Event
 
     async def run(self) -> None:
-        while not self.all_complete.is_set():
+        while not self.stop_analyzer.is_set():
             try:
                 await self.ui.speed.controller_checkpoint_event.wait()
 

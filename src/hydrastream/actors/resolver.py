@@ -10,7 +10,7 @@ from curl_cffi.requests import RequestsError
 from hydrastream._curl_shim import get_error_response
 from hydrastream.actors.file_registrator import RegisterFileCmd
 from hydrastream.engine import send_poison_pills
-from hydrastream.exceptions import LogStatus, SystemContextError
+from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import StorageBackend
 from hydrastream.models import (
     Checksum,
@@ -121,13 +121,6 @@ class MetadataResolver:
         if isinstance(e, TimeoutError):
             await self.requeue_chunk(envelope)
 
-        if isinstance(e, OSError):
-            raise SystemContextError(
-                operation="task creation",
-                original_error=str(e),
-                path=str(self.output_dir),
-            ) from e
-
         # Если мы здесь, значит ошибка критическая (Exception)
         await log(
             self.ui, f"Critical Task Creator crash: {e!r}", status=LogStatus.CRITICAL
@@ -206,7 +199,7 @@ class MetadataResolver:
             return File(
                 meta=FileMeta(
                     id=data.id,
-                    filename=filename,
+                    original_filename=filename,
                     url=data.url,
                     content_length=total_size,
                     supports_ranges=supports_ranges,
@@ -230,7 +223,7 @@ class MetadataResolver:
         return File(
             meta=FileMeta(
                 id=data.id,
-                filename=filename,
+                original_filename=filename,
                 url=data.url,
                 content_length=total_size,
                 supports_ranges=supports_ranges,
@@ -240,7 +233,7 @@ class MetadataResolver:
         )
 
     async def _register_file(self, file_obj: File) -> None:
-        filename = file_obj.meta.filename
+        filename = file_obj.meta.original_filename
         await self.reg_events_q.put(
             RegisterFileCmd(file_id=file_obj.meta.id, file_obj=file_obj)
         )

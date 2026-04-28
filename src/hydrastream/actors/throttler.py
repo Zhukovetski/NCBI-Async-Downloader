@@ -4,7 +4,7 @@
 import asyncio
 import time
 
-from curl_cffi import CurlOpt
+from curl_cffi import CurlOpt, Response
 
 from hydrastream.exceptions import (
     LogStatus,
@@ -13,8 +13,20 @@ from hydrastream.models import UIState, my_dataclass
 from hydrastream.monitor import log
 
 
+@my_dataclass(frozen=True)
+class RegisterStreamCmd:
+    stream: Response
+
+
+@my_dataclass(frozen=True)
+class RemoveStreamCmd:
+    stream: Response
+
+
 @my_dataclass
 class ThrottleController:
+    active_stream: set[Response]
+
     speed_limit: float | None
     frequency_speed_limit: int = 10
     time_speed_limit: float
@@ -22,13 +34,14 @@ class ThrottleController:
     prev_bytes: int = 0
     last_checkpoint_time: float = 0.0
     target_time: float = 0.0
+
     is_debug: bool
     ui: UIState
 
     all_complete: asyncio.Event
-    limit_event: asyncio.Event
-    controller_checkpoint_event: asyncio.Event
     throttler_checkpoint_event: asyncio.Event
+
+    throttler_q: asyncio.Queue[object]
 
     def __post_init__(self) -> None:
         self.time_speed_limit = 1 / self.frequency_speed_limit
@@ -38,7 +51,6 @@ class ThrottleController:
             self.target_time = self.bytes_to_check / self.speed_limit
         else:
             self.bytes_to_check = 5 * 1024**2
-        self.limit_event.set()
 
     async def throttle_controller(self) -> None:
         self.last_checkpoint_time = time.monotonic()
@@ -46,8 +58,7 @@ class ThrottleController:
         while not self.all_complete.is_set():
             try:
                 await self.throttler_checkpoint_event.wait()
-                if self.all_complete.is_set():
-                    break
+
                 self.throttler_checkpoint_event.clear()
 
                 # Вся логика теперь в отдельной функции
@@ -76,13 +87,13 @@ class ThrottleController:
             sleep_duration = target_time - elapsed
 
             # Ставим на паузу (через curl)
-            _set_curl_speed_limit(limit=1)
+            self._set_curl_speed_limit(limit=1)
             await asyncio.sleep(sleep_duration)
             # Снимаем паузу
-            _set_curl_speed_limit(limit=0)
+            self._set_curl_speed_limit(limit=0)
 
     def _set_curl_speed_limit(self, limit: int) -> None:
         """Вспомогательная функция для прохода по активным потокам."""
-        for r in ctx.active_stream:
+        for r in self.active_stream:
             if r.curl is not None:
                 r.curl.setopt(CurlOpt.MAX_RECV_SPEED_LARGE, limit)
