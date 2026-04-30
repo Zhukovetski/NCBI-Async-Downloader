@@ -13,7 +13,7 @@ from curl_cffi.requests import RequestsError
 from hydrastream._curl_shim import aiter_bytes, get_error_response
 from hydrastream.actors.controller import MaxLimitSignal, NetworkCongestionSignal
 from hydrastream.actors.dispatcher import FileCompleted
-from hydrastream.actors.file_registrator import RemoveFileCmd
+from hydrastream.actors.stater import RemoveFileCmd
 from hydrastream.actors.throttler import RegisterStreamCmd, RemoveStreamCmd
 from hydrastream.engine import send_poison_pills
 from hydrastream.exceptions import (

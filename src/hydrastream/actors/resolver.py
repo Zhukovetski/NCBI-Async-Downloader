@@ -9,7 +9,7 @@ from curl_cffi import Headers, Response
 from curl_cffi.requests import RequestsError
 
 from hydrastream._curl_shim import get_error_response
-from hydrastream.actors.file_registrator import RegisterFileCmd
+from hydrastream.actors.stater import RegisterFileCmd
 from hydrastream.engine import send_poison_pills
 from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import StorageBackend

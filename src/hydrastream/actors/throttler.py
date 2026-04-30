@@ -23,6 +23,16 @@ class RemoveStreamCmd:
     stream: Response
 
 
+@my_dataclass(frozen=True)
+class DiskBufferFullSignal:
+    pass
+
+
+@my_dataclass(frozen=True)
+class DiskBufferClearedSignal:
+    pass
+
+
 @my_dataclass
 class ThrottleController:
     active_stream: set[Response]

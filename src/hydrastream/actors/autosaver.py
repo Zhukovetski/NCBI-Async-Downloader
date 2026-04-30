@@ -3,7 +3,7 @@
 
 import asyncio
 
-from hydrastream.actors.file_registrator import GetSnapshotCmd
+from hydrastream.actors.stater import GetSnapshotCmd
 from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import StorageBackend
 from hydrastream.models import Envelope, File, UIState, WriteChunk, my_dataclass

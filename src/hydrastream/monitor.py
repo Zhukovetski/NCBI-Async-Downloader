@@ -241,29 +241,39 @@ def update_filename(ctx: UIState, old_filename: str, new_filename: str) -> None:
         ctx.rich.tasks[new_filename] = ctx.rich.tasks.pop(old_filename)
 
 
-async def refresh_loop(ctx: UIState) -> None:
-    if ctx.rich.progress:
-        while ctx.is_running:
-            try:
-                current_batch = ctx.rich.buffer.copy()
-                ctx.rich.buffer.clear()
+async def ui_refresh_actor(ctx: UIState, state_keeper_q: asyncio.Queue) -> None:
+    """Независимый цикл отрисовки (Render Loop)"""
+    reply_q = asyncio.Queue(maxsize=1)
 
-                for filename, bytes_to_advance in current_batch.items():
-                    if bytes_to_advance > 0 and filename in ctx.rich.tasks:
-                        ctx.rich.progress.update(
-                            ctx.rich.tasks[filename],
-                            advance=bytes_to_advance,
-                            visible=True,
-                        )
-                        if filename not in ctx.rich.active_files:
-                            ctx.rich.active_files.add(filename)
-                            update_panel_title(ctx)
+    if not ctx.rich.progress:
+        return
 
-                await asyncio.sleep(ctx.rich.renewal_rate)
-            except Exception as e:
-                if ctx.display.debug:
-                    raise
-                await log(ctx, f"UI Refresh Error: {e!r}", status=LogStatus.ERROR)
+    while ctx.is_running:
+        try:
+            # 1. Засыпаем до следующего "кадра" (например, на 0.1 сек)
+            await asyncio.sleep(ctx.rich.renewal_rate)
+
+            # 2. Запрашиваем дельты у базы данных (StateKeeper)
+            await state_keeper_q.put(GetUIDeltasCmd(reply_to=reply_q))
+            deltas = await reply_q.get()
+
+            # 3. Отрисовываем!
+            for file_id, bytes_to_advance in deltas.items():
+                if bytes_to_advance > 0 and file_id in ctx.rich.tasks:
+                    ctx.rich.progress.update(
+                        ctx.rich.tasks[file_id],
+                        advance=bytes_to_advance,
+                        visible=True,
+                    )
+
+                    if file_id not in ctx.rich.active_files:
+                        ctx.rich.active_files.add(file_id)
+                        update_panel_title(ctx)
+
+        except Exception as e:
+            if ctx.display.debug:
+                raise
+            await log(ctx, f"UI Refresh Error: {e!r}", status=LogStatus.ERROR)
 
 
 def update_panel_title(ctx: UIState) -> None:

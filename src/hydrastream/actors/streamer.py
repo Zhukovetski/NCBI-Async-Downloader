@@ -3,7 +3,7 @@ import hashlib
 from collections.abc import AsyncGenerator
 
 from hydrastream.actors.dispatcher import FileCompleted
-from hydrastream.actors.file_registrator import RemoveFileCmd
+from hydrastream.actors.stater import RemoveFileCmd
 from hydrastream.exceptions import FileSizeMismatchError, HashMismatchError, LogStatus
 from hydrastream.interfaces import Hasher
 from hydrastream.models import (

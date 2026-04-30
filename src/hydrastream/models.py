@@ -591,6 +591,14 @@ class Envelope(Generic[T_co]):
     is_last_survivor: bool = field(compare=False, default=False)
 
 
+@my_dataclass(frozen=True)
+class Cmd:
+    msg: bool = field(compare=False, default=False)
+
+    is_poison_pill: bool = field(compare=False, default=False)
+    is_last_survivor: bool = field(compare=False, default=False)
+
+
 @my_dataclass
 class QueueSet:
     links: asyncio.PriorityQueue[Envelope[LinkData | None]] = field(
