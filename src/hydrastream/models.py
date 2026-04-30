@@ -581,7 +581,7 @@ T_co = TypeVar("T_co", covariant=True)
 
 @my_dataclass(order=True, frozen=True)
 class Envelope(Generic[T_co]):
-    sort_key: tuple[int, ...]
+    sort_key: tuple[int, ...] = field(default=(0,))
 
     payload: T_co | None = field(compare=False, default=None)
 

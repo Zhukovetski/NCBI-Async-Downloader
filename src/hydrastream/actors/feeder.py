@@ -15,7 +15,7 @@ from hydrastream.models import (
 class LinkFeeder:
     links: str | Iterable[str]
     expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None
-    links_q: asyncio.PriorityQueue[Envelope[LinkData | None]]
+    links_outbox: asyncio.PriorityQueue[Envelope[LinkData | None]]
     num_resolvers: int
 
     async def run(
@@ -29,11 +29,11 @@ class LinkFeeder:
                     checksums = Checksum(algorithm=checksums[0], value=checksums[1])
             else:
                 self.expected_checksums = None
-            await self.links_q.put(
+            await self.links_outbox.put(
                 Envelope(
                     sort_key=(id,),
                     payload=LinkData(id=id, url=link, checksum=checksums),
                 )
             )
 
-        await send_poison_pills(self.links_q, self.num_resolvers)
+        await send_poison_pills(self.links_outbox, self.num_resolvers)

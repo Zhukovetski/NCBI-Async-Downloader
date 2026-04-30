@@ -3,6 +3,7 @@
 
 import asyncio
 import random
+from abc import ABC, abstractmethod
 
 from curl_cffi import Headers, Response
 from curl_cffi.requests import RequestsError
@@ -30,29 +31,26 @@ from hydrastream.utils import redact_url
 
 
 @my_dataclass
-class MetadataResolver:
+class BaseMetadataResolver(ABC):
+    # Общие зависимости (никакого fs или stream_chunk_size!)
     threads: int
-
     MIN_CHUNK: int
-    STREAM_CHUNK_SIZE: int
 
     links_q: asyncio.PriorityQueue[Envelope[LinkData | None]]
     files_q: asyncio.PriorityQueue[Envelope[File | None]]
     reg_events_q: asyncio.Queue[object]
 
     num_dispathers: int
-
     all_complete: asyncio.Event
 
     is_dry_run: bool
-    is_stream: bool
     is_verify: bool
 
     ui: UIState
     net: NetworkState
-    fs: StorageBackend
 
-    async def metadata_resolver(self) -> None:
+    async def run(self) -> None:
+        """Это ШАБЛОННЫЙ МЕТОД. Наследники не переопределяют его!"""
         checksum = None
         while True:
             envelope = await self.links_q.get()
@@ -60,7 +58,6 @@ class MetadataResolver:
             if envelope.is_poison_pill:
                 if envelope.is_last_survivor:
                     await send_poison_pills(self.files_q, self.num_dispathers)
-
                     if self.is_dry_run:
                         self.all_complete.set()
                 break
@@ -70,13 +67,14 @@ class MetadataResolver:
 
             try:
                 meta = await self._fetch_metadata(data.url)
-
                 filename, total_size, supports_ranges = meta
 
                 if self.is_verify and not data.checksum:
                     checksum = await self._resolve_hash(
                         data.url, filename, data.checksum
                     )
+
+                # ВЫЗЫВАЕМ АБСТРАКТНЫЙ МЕТОД (Делегируем создание наследнику)
                 file_obj = await self._prepare_file_object(
                     data=data,
                     filename=filename,
@@ -88,9 +86,38 @@ class MetadataResolver:
                 await self._register_file(file_obj)
 
             except Exception as e:
-                await self.handle_error(e, envelope, data)
+                await self._handle_error(e, envelope, data)
 
-    async def handle_error(
+    async def _register_file(self, file_obj: File) -> None:
+        """Общая логика регистрации, внутри которой есть ХУК для наследников."""
+        filename = file_obj.meta.original_filename
+
+        await self.reg_events_q.put(
+            RegisterFileCmd(file_id=file_obj.meta.id, file_obj=file_obj)
+        )
+        add_file(self.ui, filename, file_obj.meta.content_length)
+
+        # ВЫЗЫВАЕМ ХУК (Стрим проигнорирует, Диск - обновит UI)
+        await self._on_file_registered(file_obj)
+
+        await self.files_q.put(Envelope(sort_key=(file_obj.meta.id,), payload=file_obj))
+
+    @abstractmethod
+    async def _prepare_file_object(
+        self,
+        data: LinkData,
+        filename: str,
+        total_size: int,
+        supports_ranges: bool,
+        checksum: Checksum | None,
+    ) -> File:
+        pass
+
+    @abstractmethod
+    async def _on_file_registered(self, file_obj: File) -> None:
+        pass
+
+    async def _handle_error(
         self,
         e: Exception,
         envelope: Envelope[LinkData | None],
@@ -113,13 +140,13 @@ class MetadataResolver:
                     )
 
                 # Временные ошибки сервера (5xx, 429) — в очередь
-                await self.requeue_chunk(envelope, delay_range=(0.5, 2.0))
+                await self._requeue_chunk(envelope, delay_range=(0.5, 2.0))
             else:
                 # Сетевая ошибка без ответа
-                await self.requeue_chunk(envelope)
+                await self._requeue_chunk(envelope)
 
         if isinstance(e, TimeoutError):
-            await self.requeue_chunk(envelope)
+            await self._requeue_chunk(envelope)
 
         # Если мы здесь, значит ошибка критическая (Exception)
         await log(
@@ -127,7 +154,7 @@ class MetadataResolver:
         )
         raise e
 
-    async def requeue_chunk(
+    async def _requeue_chunk(
         self,
         envelope: Envelope[LinkData | None] | None,
         delay_range: tuple[float, float] = (1.0, 3.0),
@@ -146,11 +173,11 @@ class MetadataResolver:
             # Контекстный менеджер 'async with' сам закроет соединение в конце
             async with stream_chunk(self.net, url) as resp:
                 headers = resp.headers
-                return self.parse_headers(url, headers)
+                return self._parse_headers(url, headers)
 
-        return self.parse_headers(url, response.headers)
+        return self._parse_headers(url, response.headers)
 
-    def parse_headers(self, url: str, headers: Headers) -> tuple[str, int, bool]:
+    def _parse_headers(self, url: str, headers: Headers) -> tuple[str, int, bool]:
         total_size = int(headers.get("content-length", 0))
 
         accept_ranges = headers.get("accept-ranges", "").lower()
@@ -182,6 +209,12 @@ class MetadataResolver:
 
         return checksum
 
+
+@my_dataclass
+class StreamMetadataResolver(BaseMetadataResolver):
+    # Специфичная зависимость только для стрима!
+    STREAM_CHUNK_SIZE: int
+
     async def _prepare_file_object(
         self,
         data: LinkData,
@@ -190,23 +223,45 @@ class MetadataResolver:
         supports_ranges: bool,
         checksum: Checksum | None,
     ) -> File:
-        parts = self.threads
-        chunk_size = max(total_size // parts, self.MIN_CHUNK) if total_size > 0 else 0
-        if self.is_stream and chunk_size > self.STREAM_CHUNK_SIZE:
-            chunk_size = self.STREAM_CHUNK_SIZE
+        chunk_size = (
+            max(total_size // self.threads, self.MIN_CHUNK) if total_size > 0 else 0
+        )
+        chunk_size = min(chunk_size, self.STREAM_CHUNK_SIZE)
 
-        if self.is_stream:
-            return File(
-                meta=FileMeta(
-                    id=data.id,
-                    original_filename=filename,
-                    url=data.url,
-                    content_length=total_size,
-                    supports_ranges=supports_ranges,
-                    expected_checksum=checksum,
-                ),
-                chunk_size=chunk_size,
-            )
+        return File(
+            meta=FileMeta(
+                id=data.id,
+                original_filename=filename,
+                url=data.url,
+                content_length=total_size,
+                supports_ranges=supports_ranges,
+                expected_checksum=checksum,
+            ),
+            chunk_size=chunk_size,
+        )
+
+    async def _on_file_registered(self, file_obj: File) -> None:
+        # В режиме стрима нам не нужно пересчитывать скачанные байты для UI!
+        pass
+
+
+@my_dataclass
+class DiskMetadataResolver(BaseMetadataResolver):
+    # Специфичная зависимость только для диска!
+    fs: StorageBackend
+
+    async def _prepare_file_object(
+        self,
+        data: LinkData,
+        filename: str,
+        total_size: int,
+        supports_ranges: bool,
+        checksum: Checksum | None,
+    ) -> File:
+        chunk_size = (
+            max(total_size // self.threads, self.MIN_CHUNK) if total_size > 0 else 0
+        )
+
         file_obj = None
         if supports_ranges:
             file_obj, num_states = self.fs.load_state(filename=filename)
@@ -240,8 +295,7 @@ class MetadataResolver:
         chunks = file_obj.chunks or []
 
         add_file(self.ui, filename, file_obj.meta.content_length)
-        if not self.is_stream:
-            downloaded = sum(c.uploaded for c in chunks)
-            if downloaded - len(chunks) > 0:
-                update(self.ui, filename, downloaded)
+        downloaded = sum(c.uploaded for c in chunks)
+        if downloaded - len(chunks) > 0:
+            update(self.ui, filename, downloaded)
         await self.files_q.put(Envelope(sort_key=(file_obj.meta.id,), payload=file_obj))

@@ -5,6 +5,7 @@ import asyncio
 import os
 import random
 import traceback
+from abc import ABC, abstractmethod
 
 from curl_cffi import Response
 from curl_cffi.requests import RequestsError
@@ -36,29 +37,18 @@ from hydrastream.network import stream_chunk, try_scale_up
 
 
 @my_dataclass
-class DownloadWorker:
-    chunks_q: asyncio.PriorityQueue[Envelope[Chunk | None]]
-    stream_chunks_q: asyncio.Queue[Envelope[StreamChunk | None]]
-    disk_q: asyncio.Queue[Envelope[WriteChunk | None]]
-    controller_q: asyncio.Queue[object]
-    file_discovery: asyncio.Queue[int]
-    throttler_q: asyncio.Queue[object]
-    reg_events_q: asyncio.Queue[object]
-    file_limit_q: asyncio.Queue[object]
+class BaseDownloadWorker(ABC):
+    chunks_inbox: asyncio.PriorityQueue[Envelope[Chunk | None]]
+    throttler_outbox: asyncio.Queue[object] | None = None
+    controller_outbox: asyncio.Queue[object]
 
     wakeup_event: asyncio.Event
     all_complete: asyncio.Event
 
-    num_writers: int
-
-    is_dry_run: bool
-    is_stream: bool
-    is_verify: bool
-    is_debug: bool
-
     ui: UIState
     net: NetworkState
-    fs: StorageBackend
+
+    is_debug: bool
 
     async def run(self) -> None:
         while True:
@@ -70,7 +60,8 @@ class DownloadWorker:
                 continue
 
             try:
-                await self.process_chunk(chunk)
+                if chunk.current_pos > chunk.end:
+                    await self.process_chunk(chunk)
 
                 if not chunk.is_finished:
                     await log(
@@ -88,18 +79,13 @@ class DownloadWorker:
                 await self.handle_worker_error(envelope, chunk, e)
 
     async def get_chunk(self) -> tuple[Envelope[Chunk | None] | None, Chunk | None]:
-        envelope = await self.chunks_q.get()
+        envelope = await self.chunks_inbox.get()
 
         if envelope.is_poison_pill:
-            await self.controller_q.put(MaxLimitSignal())
+            await self.controller_outbox.put(MaxLimitSignal())
 
             if envelope.is_last_survivor:
-                if self.is_stream:
-                    await self.file_discovery.put(-1)
-
-                self.all_complete.set()
-                self.ui.speed.throttler_checkpoint_event.set()
-                await send_poison_pills(self.disk_q, self.num_writers)
+                await self._finally()
 
             return None, None
 
@@ -112,17 +98,21 @@ class DownloadWorker:
 
         return envelope, chunk
 
+    @abstractmethod
+    async def _finally(self) -> None:
+        pass
+
     async def handle_worker_error(
         self, envelope: Envelope[Chunk | None], chunk: Chunk, e: Exception
     ) -> None:
         if isinstance(e, WorkerScaleDown):
-            await self.chunks_q.put(envelope)
+            await self.chunks_inbox.put(envelope)
             return
 
         if isinstance(e, RequestsError):
             await self._handle_requests_error(envelope, chunk, e)
             self.dynamic_limit = max(self.dynamic_limit - 1, 1)
-            await self.controller_q.put(NetworkCongestionSignal())
+            await self.controller_outbox.put(NetworkCongestionSignal())
             return
 
         if isinstance(e, TimeoutError):
@@ -132,7 +122,6 @@ class DownloadWorker:
         tb_str = traceback.format_exc()
 
         if self.is_debug:
-            # В дебаге выводим в консоль/лог всю простыню, чтобы сразу найти баг
             await log(self.ui, f"CRITICAL CRASH:\n{tb_str}", status=LogStatus.CRITICAL)
 
         else:
@@ -140,7 +129,7 @@ class DownloadWorker:
                 self.ui,
                 f"Worker internal crash: {e!r}",
                 status=LogStatus.CRITICAL,
-                traceback=tb_str,  # Это поле уйдет в файл download.log!
+                traceback=tb_str,
             )
         raise e
 
@@ -155,7 +144,6 @@ class DownloadWorker:
 
         status = response.status_code
 
-        # Логика "Фатальных" ошибок
         if status in {400, 401, 403, 404, 410, 416}:
             await log(
                 self.ui,
@@ -163,17 +151,55 @@ class DownloadWorker:
                 f"failed permanently (HTTP {status}).",
                 status=LogStatus.ERROR,
             )
-            chunk.file.is_failed = True
-            self.fs.delete_file(chunk.file.actual_filename)
-
-            if self.is_stream:
-                raise DownloadFailedError(
-                    url=chunk.file.meta.url,
-                    status_code=status,
-                    reason=response.reason,
-                )
+            await self._handle_critical_requests_error(chunk, response)
         else:
             await self.requeue_chunk(envelope, chunk, delay_range=(0.5, 2.0))
+
+    @abstractmethod
+    async def _handle_critical_requests_error(
+        self, chunk: Chunk, response: Response
+    ) -> None:
+        pass
+
+    @abstractmethod
+    async def requeue_chunk(
+        self,
+        envelope: Envelope[Chunk | None],
+        chunk: Chunk,
+        delay_range: tuple[float, float] = (1.0, 3.0),
+    ) -> None:
+        pass
+
+    @abstractmethod
+    async def process_chunk(self, chunk: Chunk) -> None:
+        pass
+
+    @abstractmethod
+    async def file_done(
+        self,
+        chunk: Chunk,
+    ) -> None:
+        pass
+
+
+@my_dataclass
+class StreamDownloadWorker(BaseDownloadWorker):
+    stream_chunks_outbox: asyncio.Queue[Envelope[StreamChunk | None]]
+    file_discovery_outbox: asyncio.Queue[Envelope[None]]
+
+    async def _finally(self) -> None:
+        await send_poison_pills(self.file_discovery_outbox)
+
+        self.all_complete.set()
+
+    async def _handle_critical_requests_error(
+        self, chunk: Chunk, response: Response
+    ) -> None:
+        raise DownloadFailedError(
+            url=chunk.file.meta.url,
+            status_code=response.status_code,
+            reason=response.reason,
+        )
 
     async def requeue_chunk(
         self,
@@ -185,10 +211,90 @@ class DownloadWorker:
         supports_ranges = file_obj.meta.supports_ranges
 
         if not supports_ranges:
-            if self.is_stream:
-                raise StreamError(
-                    url=chunk.file.meta.url, filename=chunk.file.actual_filename
-                )
+            raise StreamError(
+                url=chunk.file.meta.url, filename=chunk.file.actual_filename
+            )
+        await self.chunks_inbox.put(envelope)
+        delay = random.uniform(*delay_range)
+        await asyncio.sleep(delay)
+
+    async def process_chunk(self, chunk: Chunk) -> None:
+        if chunk.file.meta.supports_ranges:
+            headers = {"Range": f"bytes={chunk.current_pos}-{chunk.end}"}
+        else:
+            headers = None
+
+        data = b""
+        async with stream_chunk(
+            self.net,
+            chunk.file.meta.url,
+            headers=headers,
+        ) as r:
+            try:
+                if self.throttler_outbox is not None:
+                    await self.throttler_outbox.put(RegisterStreamCmd(stream=r))
+                bytes_to_read = chunk.end - chunk.current_pos + 1
+
+                async for data in aiter_bytes(r, chunk_size=131072):
+                    if len(data) > bytes_to_read:
+                        data = data[:bytes_to_read]  # noqa: PLW2901
+
+                    bytes_to_read -= len(data)
+                    update(self.ui, chunk.file.actual_filename, len(data))
+
+                    await self.stream_chunks_outbox.put(
+                        Envelope(
+                            sort_key=(chunk.current_pos,),
+                            payload=StreamChunk(start=chunk.current_pos, data=data),
+                        )
+                    )
+                    chunk.current_pos = chunk.current_pos + len(data)
+
+                    if not self.wakeup_event.is_set():
+                        raise WorkerScaleDown
+
+                    if bytes_to_read <= 0:
+                        break
+
+            finally:
+                if self.throttler_outbox is not None:
+                    await self.throttler_outbox.put(RemoveStreamCmd(stream=r))
+
+    async def file_done(
+        self,
+        chunk: Chunk,
+    ) -> None:
+        pass
+
+
+@my_dataclass
+class DiskDownloadWorker(BaseDownloadWorker):
+    disk_outbox: asyncio.Queue[Envelope[WriteChunk | None]]
+    reg_events_outbox: asyncio.Queue[object]
+    file_limit_outbox: asyncio.Queue[object]
+
+    fs: StorageBackend
+
+    async def _finally(self) -> None:
+        self.all_complete.set()
+        await send_poison_pills(self.disk_outbox)
+
+    async def _handle_critical_requests_error(
+        self, chunk: Chunk, response: Response
+    ) -> None:
+        chunk.file.is_failed = True
+        self.fs.delete_file(chunk.file.actual_filename)
+
+    async def requeue_chunk(
+        self,
+        envelope: Envelope[Chunk | None],
+        chunk: Chunk,
+        delay_range: tuple[float, float] = (1.0, 3.0),
+    ) -> None:
+        file_obj = chunk.file
+        supports_ranges = file_obj.meta.supports_ranges
+
+        if not supports_ranges:
             await log(
                 self.ui,
                 f"Connection dropped for {chunk.file.actual_filename}. "
@@ -213,28 +319,16 @@ class DownloadWorker:
                     await loop.run_in_executor(
                         None, os.ftruncate, fd, file_obj.meta.content_length
                     )
-        await self.chunks_q.put(envelope)
+        await self.chunks_inbox.put(envelope)
         delay = random.uniform(*delay_range)
         await asyncio.sleep(delay)
 
-    async def process_chunk(self, chunk: Chunk) -> None:
-        if chunk.current_pos > chunk.end:
-            return
+    async def process_chunk(self, chunk: Chunk) -> None:  # noqa
         if chunk.file.meta.supports_ranges:
             headers = {"Range": f"bytes={chunk.current_pos}-{chunk.end}"}
         else:
             headers = None
 
-        if not self.is_stream:
-            await self.disk_process_chunk(chunk, headers)
-        else:
-            await self.stream_process_chunk(chunk, headers)
-
-    async def disk_process_chunk(
-        self,
-        chunk: Chunk,
-        headers: dict[str, str] | None,
-    ) -> None:
         buffer_list: list[bytes] = []
         current_buffer_size = 0
 
@@ -249,7 +343,8 @@ class DownloadWorker:
             headers=headers,
         ) as r:
             try:
-                await self.throttler_q.put(RegisterStreamCmd(stream=r))
+                if self.throttler_outbox is not None:
+                    await self.throttler_outbox.put(RegisterStreamCmd(stream=r))
                 bytes_to_read = chunk.end - chunk.current_pos + 1
 
                 async for data in aiter_bytes(r, chunk_size=131072):
@@ -263,7 +358,7 @@ class DownloadWorker:
                     update(self.ui, chunk.file.actual_filename, len(data))
 
                     if current_buffer_size >= buffer_size:
-                        await self.disk_q.put(
+                        await self.disk_outbox.put(
                             Envelope(
                                 sort_key=(fd, chunk.current_pos),
                                 payload=WriteChunk(
@@ -288,9 +383,10 @@ class DownloadWorker:
                         raise WorkerScaleDown
 
             finally:
-                await self.throttler_q.put(RemoveStreamCmd(stream=r))
+                if self.throttler_outbox is not None:
+                    await self.throttler_outbox.put(RemoveStreamCmd(stream=r))
                 if buffer_list:
-                    await self.disk_q.put(
+                    await self.disk_outbox.put(
                         Envelope(
                             sort_key=(fd, chunk.current_pos),
                             payload=WriteChunk(
@@ -302,51 +398,10 @@ class DownloadWorker:
                         )
                     )
 
-    async def stream_process_chunk(
-        self,
-        chunk: Chunk,
-        headers: dict[str, str] | None,
-    ) -> None:
-        data = b""
-        async with stream_chunk(
-            self.net,
-            chunk.file.meta.url,
-            headers=headers,
-        ) as r:
-            try:
-                await self.throttler_q.put(RegisterStreamCmd(stream=r))
-                bytes_to_read = chunk.end - chunk.current_pos + 1
-
-                async for data in aiter_bytes(r, chunk_size=131072):
-                    if len(data) > bytes_to_read:
-                        data = data[:bytes_to_read]  # noqa: PLW2901
-
-                    bytes_to_read -= len(data)
-                    update(self.ui, chunk.file.actual_filename, len(data))
-
-                    await self.stream_chunks_q.put(
-                        Envelope(
-                            sort_key=(chunk.current_pos,),
-                            payload=StreamChunk(start=chunk.current_pos, data=data),
-                        )
-                    )
-                    chunk.current_pos = chunk.current_pos + len(data)
-
-                    if not self.wakeup_event.is_set():
-                        raise WorkerScaleDown
-
-                    if bytes_to_read <= 0:
-                        break
-
-            finally:
-                await self.throttler_q.put(RemoveStreamCmd(stream=r))
-
     async def file_done(
         self,
         chunk: Chunk,
     ) -> None:
-        if self.is_stream:
-            return
 
         filename = chunk.file.actual_filename
         file_obj = chunk.file
@@ -375,5 +430,5 @@ class DownloadWorker:
         self.fs.close_file(fd_or_conn=file_obj.fd)
         self.fs.delete_state(filename)
         await done(self.ui, filename)
-        await self.reg_events_q.put(RemoveFileCmd(file_id=chunk.file.meta.id))
-        await self.file_limit_q.put(FileCompleted())
+        await self.reg_events_outbox.put(RemoveFileCmd(file_id=chunk.file.meta.id))
+        await self.file_limit_outbox.put(FileCompleted())

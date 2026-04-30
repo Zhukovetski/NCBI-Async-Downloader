@@ -32,7 +32,7 @@ Ts = TypeVarTuple("Ts")
 async def send_poison_pills(
     queue: asyncio.PriorityQueue[Envelope[Any | None]]
     | asyncio.Queue[Envelope[Any | None]],
-    count: int,
+    count: int = 1,
     envelope_factory: Callable[[int, bool], Envelope[None]] | None = None,
 ) -> None:
 

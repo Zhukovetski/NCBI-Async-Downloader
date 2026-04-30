@@ -10,7 +10,7 @@ class MemoryThrottler:
     credit_inbox: asyncio.Queue[int]
     chunk_outbox: asyncio.PriorityQueue[Envelope[Chunk | None]]
 
-    budget: int = 50 * 1024 * 1024
+    budget: int
 
     num_workers: int
 
