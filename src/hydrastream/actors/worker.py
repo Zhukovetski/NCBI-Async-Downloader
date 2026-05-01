@@ -13,9 +13,8 @@ from curl_cffi.requests import RequestsError
 from hydrastream._curl_shim import aiter_bytes, get_error_response
 from hydrastream.actors.controller import MaxLimitSignal, NetworkCongestionSignal
 from hydrastream.actors.dispatcher import FileCompleted
-from hydrastream.actors.stater import RemoveFileCmd
+from hydrastream.actors.stater import ProgressDeltaCmd, RemoveFileCmd, StateKeeperCmd
 from hydrastream.actors.throttler import RegisterStreamCmd, RemoveStreamCmd
-from hydrastream.engine import send_poison_pills
 from hydrastream.exceptions import (
     DownloadFailedError,
     LogStatus,
@@ -25,6 +24,7 @@ from hydrastream.exceptions import (
 from hydrastream.interfaces import StorageBackend
 from hydrastream.models import (
     Chunk,
+    Cmd,
     Envelope,
     NetworkState,
     StreamChunk,
@@ -32,7 +32,7 @@ from hydrastream.models import (
     WriteChunk,
     my_dataclass,
 )
-from hydrastream.monitor import done, log, update
+from hydrastream.monitor import done, log
 from hydrastream.network import stream_chunk, try_scale_up
 
 
@@ -41,6 +41,7 @@ class BaseDownloadWorker(ABC):
     chunks_inbox: asyncio.PriorityQueue[Envelope[Chunk | None]]
     throttler_outbox: asyncio.Queue[object] | None = None
     controller_outbox: asyncio.Queue[object]
+    state_outbox: asyncio.Queue[StateKeeperCmd]
 
     wakeup_event: asyncio.Event
     all_complete: asyncio.Event
@@ -184,11 +185,11 @@ class BaseDownloadWorker(ABC):
 
 @my_dataclass
 class StreamDownloadWorker(BaseDownloadWorker):
-    stream_chunks_outbox: asyncio.Queue[Envelope[StreamChunk | None]]
-    file_discovery_outbox: asyncio.Queue[Envelope[None]]
+    stream_chunks_outbox: asyncio.PriorityQueue[Envelope[StreamChunk | None]]
+    file_discovery_outbox: asyncio.Queue[None]
 
     async def _finally(self) -> None:
-        await send_poison_pills(self.file_discovery_outbox)
+        await self.file_discovery_outbox.put(None)
 
         self.all_complete.set()
 
@@ -223,8 +224,9 @@ class StreamDownloadWorker(BaseDownloadWorker):
             headers = {"Range": f"bytes={chunk.current_pos}-{chunk.end}"}
         else:
             headers = None
+        buffer_list: list[bytes] = []
+        current_buffer_size = 0
 
-        data = b""
         async with stream_chunk(
             self.net,
             chunk.file.meta.url,
@@ -239,16 +241,15 @@ class StreamDownloadWorker(BaseDownloadWorker):
                     if len(data) > bytes_to_read:
                         data = data[:bytes_to_read]  # noqa: PLW2901
 
-                    bytes_to_read -= len(data)
-                    update(self.ui, chunk.file.actual_filename, len(data))
+                    buffer_list.append(data)
+                    current_buffer_size += len(data)
 
-                    await self.stream_chunks_outbox.put(
-                        Envelope(
-                            sort_key=(chunk.current_pos,),
-                            payload=StreamChunk(start=chunk.current_pos, data=data),
+                    bytes_to_read -= len(data)
+                    await self.state_outbox.put(
+                        ProgressDeltaCmd(
+                            file_id=chunk.file.meta.id, delta_bytes=len(data)
                         )
                     )
-                    chunk.current_pos = chunk.current_pos + len(data)
 
                     if not self.wakeup_event.is_set():
                         raise WorkerScaleDown
@@ -256,9 +257,23 @@ class StreamDownloadWorker(BaseDownloadWorker):
                     if bytes_to_read <= 0:
                         break
 
+                if random.random() < 0.1:
+                    await try_scale_up(self.net.rate_limiter)
+
             finally:
                 if self.throttler_outbox is not None:
                     await self.throttler_outbox.put(RemoveStreamCmd(stream=r))
+
+                if buffer_list:
+                    await self.stream_chunks_outbox.put(
+                        Envelope(
+                            sort_key=(chunk.current_pos,),
+                            payload=StreamChunk(
+                                start=chunk.current_pos, data=buffer_list
+                            ),
+                        )
+                    )
+                    chunk.current_pos = chunk.current_pos + current_buffer_size
 
     async def file_done(
         self,
@@ -269,7 +284,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
 
 @my_dataclass
 class DiskDownloadWorker(BaseDownloadWorker):
-    disk_outbox: asyncio.Queue[Envelope[WriteChunk | None]]
+    disk_outbox: asyncio.Queue[WriteChunk | Cmd]
     reg_events_outbox: asyncio.Queue[object]
     file_limit_outbox: asyncio.Queue[object]
 
@@ -277,7 +292,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
 
     async def _finally(self) -> None:
         self.all_complete.set()
-        await send_poison_pills(self.disk_outbox)
+        await self.disk_outbox.put(Cmd(is_poison_pill=True, is_last_survivor=True))
 
     async def _handle_critical_requests_error(
         self, chunk: Chunk, response: Response
@@ -304,7 +319,11 @@ class DiskDownloadWorker(BaseDownloadWorker):
 
             downloaded_so_far = chunk.current_pos - chunk.start
             if downloaded_so_far > 0:
-                update(self.ui, chunk.file.actual_filename, -downloaded_so_far)
+                await self.state_outbox.put(
+                    ProgressDeltaCmd(
+                        file_id=chunk.file.meta.id, delta_bytes=-downloaded_so_far
+                    )
+                )
 
             chunk.current_pos = chunk.start
 
@@ -355,18 +374,19 @@ class DiskDownloadWorker(BaseDownloadWorker):
                     current_buffer_size += len(data)
 
                     bytes_to_read -= len(data)
-                    update(self.ui, chunk.file.actual_filename, len(data))
+                    await self.state_outbox.put(
+                        ProgressDeltaCmd(
+                            file_id=chunk.file.meta.id, delta_bytes=len(data)
+                        )
+                    )
 
                     if current_buffer_size >= buffer_size:
                         await self.disk_outbox.put(
-                            Envelope(
-                                sort_key=(fd, chunk.current_pos),
-                                payload=WriteChunk(
-                                    fd=fd,
-                                    offset=chunk.current_pos,
-                                    length=current_buffer_size,
-                                    data=buffer_list,
-                                ),
+                            WriteChunk(
+                                fd=fd,
+                                offset=chunk.current_pos,
+                                length=current_buffer_size,
+                                data=buffer_list,
                             )
                         )
                         chunk.current_pos += current_buffer_size
@@ -387,16 +407,14 @@ class DiskDownloadWorker(BaseDownloadWorker):
                     await self.throttler_outbox.put(RemoveStreamCmd(stream=r))
                 if buffer_list:
                     await self.disk_outbox.put(
-                        Envelope(
-                            sort_key=(fd, chunk.current_pos),
-                            payload=WriteChunk(
-                                fd=fd,
-                                offset=chunk.current_pos,
-                                length=current_buffer_size,
-                                data=buffer_list,
-                            ),
+                        WriteChunk(
+                            fd=fd,
+                            offset=chunk.current_pos,
+                            length=current_buffer_size,
+                            data=buffer_list,
                         )
                     )
+                    chunk.current_pos += current_buffer_size
 
     async def file_done(
         self,
@@ -429,6 +447,6 @@ class DiskDownloadWorker(BaseDownloadWorker):
             )
         self.fs.close_file(fd_or_conn=file_obj.fd)
         self.fs.delete_state(filename)
-        await done(self.ui, filename)
+        await done(self.ui, file_obj.meta.id, filename)
         await self.reg_events_outbox.put(RemoveFileCmd(file_id=chunk.file.meta.id))
         await self.file_limit_outbox.put(FileCompleted())

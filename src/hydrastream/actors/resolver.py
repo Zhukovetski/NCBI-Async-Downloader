@@ -9,7 +9,7 @@ from curl_cffi import Headers, Response
 from curl_cffi.requests import RequestsError
 
 from hydrastream._curl_shim import get_error_response
-from hydrastream.actors.stater import RegisterFileCmd
+from hydrastream.actors.stater import ProgressDeltaCmd, RegisterFileCmd, StateKeeperCmd
 from hydrastream.engine import send_poison_pills
 from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import StorageBackend
@@ -24,7 +24,7 @@ from hydrastream.models import (
     UIState,
     my_dataclass,
 )
-from hydrastream.monitor import add_file, done, log, update
+from hydrastream.monitor import add_file, done, log
 from hydrastream.network import extract_filename, safe_request, stream_chunk
 from hydrastream.providers import ProviderRouter
 from hydrastream.utils import redact_url
@@ -32,13 +32,12 @@ from hydrastream.utils import redact_url
 
 @my_dataclass
 class BaseMetadataResolver(ABC):
-    # Общие зависимости (никакого fs или stream_chunk_size!)
     threads: int
     MIN_CHUNK: int
 
-    links_q: asyncio.PriorityQueue[Envelope[LinkData | None]]
-    files_q: asyncio.PriorityQueue[Envelope[File | None]]
-    reg_events_q: asyncio.Queue[object]
+    links_inbox: asyncio.PriorityQueue[Envelope[LinkData | None]]
+    files_outbox: asyncio.PriorityQueue[Envelope[File | None]]
+    reg_events_outbox: asyncio.Queue[object]
 
     num_dispathers: int
     all_complete: asyncio.Event
@@ -53,11 +52,11 @@ class BaseMetadataResolver(ABC):
         """Это ШАБЛОННЫЙ МЕТОД. Наследники не переопределяют его!"""
         checksum = None
         while True:
-            envelope = await self.links_q.get()
+            envelope = await self.links_inbox.get()
 
             if envelope.is_poison_pill:
                 if envelope.is_last_survivor:
-                    await send_poison_pills(self.files_q, self.num_dispathers)
+                    await send_poison_pills(self.files_outbox, self.num_dispathers)
                     if self.is_dry_run:
                         self.all_complete.set()
                 break
@@ -71,7 +70,7 @@ class BaseMetadataResolver(ABC):
 
                 if self.is_verify and not data.checksum:
                     checksum = await self._resolve_hash(
-                        data.url, filename, data.checksum
+                        data.id, data.url, filename, data.checksum
                     )
 
                 # ВЫЗЫВАЕМ АБСТРАКТНЫЙ МЕТОД (Делегируем создание наследнику)
@@ -92,15 +91,17 @@ class BaseMetadataResolver(ABC):
         """Общая логика регистрации, внутри которой есть ХУК для наследников."""
         filename = file_obj.meta.original_filename
 
-        await self.reg_events_q.put(
+        await self.reg_events_outbox.put(
             RegisterFileCmd(file_id=file_obj.meta.id, file_obj=file_obj)
         )
-        add_file(self.ui, filename, file_obj.meta.content_length)
+        add_file(self.ui, file_obj.meta.id, filename, file_obj.meta.content_length)
 
         # ВЫЗЫВАЕМ ХУК (Стрим проигнорирует, Диск - обновит UI)
         await self._on_file_registered(file_obj)
 
-        await self.files_q.put(Envelope(sort_key=(file_obj.meta.id,), payload=file_obj))
+        await self.files_outbox.put(
+            Envelope(sort_key=(file_obj.meta.id,), payload=file_obj)
+        )
 
     @abstractmethod
     async def _prepare_file_object(
@@ -161,7 +162,7 @@ class BaseMetadataResolver(ABC):
     ) -> None:
         if envelope is None:
             return
-        await self.links_q.put(envelope)
+        await self.links_inbox.put(envelope)
         delay = random.uniform(*delay_range)
         await asyncio.sleep(delay)
 
@@ -187,6 +188,7 @@ class BaseMetadataResolver(ABC):
 
     async def _resolve_hash(
         self,
+        id: int,
         url: str,
         filename: str,
         checksum_tuple: tuple[TypeHash, str] | None,
@@ -194,11 +196,11 @@ class BaseMetadataResolver(ABC):
         if checksum_tuple:
             return Checksum(algorithm=checksum_tuple[0], value=checksum_tuple[1])
 
-        add_file(self.ui, filename)
+        add_file(self.ui, id, filename)
 
         provider = ProviderRouter()
         checksum = await provider.resolve_hash(self.net, url, filename)
-        await done(self.ui, filename)
+        await done(self.ui, id, filename)
 
         if checksum is None:
             await log(
@@ -247,7 +249,8 @@ class StreamMetadataResolver(BaseMetadataResolver):
 
 @my_dataclass
 class DiskMetadataResolver(BaseMetadataResolver):
-    # Специфичная зависимость только для диска!
+    state_outbox: asyncio.Queue[StateKeeperCmd]
+
     fs: StorageBackend
 
     async def _prepare_file_object(
@@ -289,13 +292,17 @@ class DiskMetadataResolver(BaseMetadataResolver):
 
     async def _register_file(self, file_obj: File) -> None:
         filename = file_obj.meta.original_filename
-        await self.reg_events_q.put(
+        await self.reg_events_outbox.put(
             RegisterFileCmd(file_id=file_obj.meta.id, file_obj=file_obj)
         )
         chunks = file_obj.chunks or []
 
-        add_file(self.ui, filename, file_obj.meta.content_length)
+        add_file(self.ui, file_obj.meta.id, filename, file_obj.meta.content_length)
         downloaded = sum(c.uploaded for c in chunks)
         if downloaded - len(chunks) > 0:
-            update(self.ui, filename, downloaded)
-        await self.files_q.put(Envelope(sort_key=(file_obj.meta.id,), payload=file_obj))
+            await self.state_outbox.put(
+                ProgressDeltaCmd(file_id=file_obj.meta.id, delta_bytes=downloaded)
+            )
+        await self.files_outbox.put(
+            Envelope(sort_key=(file_obj.meta.id,), payload=file_obj)
+        )

@@ -8,29 +8,21 @@ from hydrastream.models import my_dataclass
 
 @my_dataclass(frozen=True)
 class NetworkCongestionSignal:
-    """Сигнал от воркера, что сеть забита (429/503 Error)"""
-
     pass
 
 
 @my_dataclass(frozen=True)
 class MaxLimitSignal:
-    """Сигнал, что загрузка почти окончена, будим всех воркеров"""
-
     pass
 
 
 @my_dataclass(frozen=True)
 class ScaleUpSignal:
-    """Сигнал от Телеметрии: скорость растет, добавляем воркера"""
-
     pass
 
 
 @my_dataclass(frozen=True)
 class ScaleDownSignal:
-    """Сигнал от Телеметрии: скорость падает, убираем воркера"""
-
     pass
 
 

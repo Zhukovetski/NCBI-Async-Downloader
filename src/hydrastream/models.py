@@ -400,9 +400,9 @@ class RichUIState:
     dynamic_title: str = ""
     date_printed: bool = False
 
-    tasks: dict[str, TaskID] = field(default_factory=dict[str, TaskID])
-    buffer: defaultdict[str, int] = field(default_factory=lambda: defaultdict(int))
-    active_files: set[str] = field(default_factory=set[str])
+    tasks: dict[int, TaskID] = field(default_factory=dict[int, TaskID])
+    buffer: defaultdict[int, int] = field(default_factory=lambda: defaultdict(int))
+    active_files: set[int] = field(default_factory=set[int])
 
     refresh: asyncio.Task[None] | None = None
     progress: Progress | None = None
@@ -573,7 +573,7 @@ class WriteChunk:
 @my_dataclass(order=True, frozen=True)
 class StreamChunk:
     start: int
-    data: bytes = field(compare=False)
+    data: list[bytes] = field(compare=False)
 
 
 T_co = TypeVar("T_co", covariant=True)

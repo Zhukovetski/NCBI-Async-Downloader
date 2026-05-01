@@ -13,6 +13,7 @@ from hydrastream.utils import format_size
 class TelemetryAnalyzer:
     threads: int
     current_limit: int
+    analyzer_checkpoint_event: asyncio.Event
     controller_outbox: asyncio.Queue[object]
     smoothed_speed: float = 0.0
     prev_speed: float = 0.0
@@ -28,9 +29,9 @@ class TelemetryAnalyzer:
     async def run(self) -> None:
         while not self.stop_analyzer.is_set():
             try:
-                await self.ui.speed.controller_checkpoint_event.wait()
+                await self.analyzer_checkpoint_event.wait()
 
-                self.ui.speed.controller_checkpoint_event.clear()
+                self.analyzer_checkpoint_event.clear()
 
                 # Просто делаем шаг
                 await self._step()
@@ -53,8 +54,8 @@ class TelemetryAnalyzer:
     def _update_window(self, speed_now: float, elapsed: float) -> None:
         safe_speed = max(speed_now, 0.001)
         coef = 1 / safe_speed**0.25
-        new_bytes = int(self.ui.speed.bytes_to_check * (1 - coef + elapsed))
-        self.ui.speed.bytes_to_check = max(self.min_window, new_bytes)
+        new_bytes = int(self.bytes_to_check * (1 - coef + elapsed))
+        self.bytes_to_check = max(self.min_window, new_bytes)
 
     async def _log_scale_event(self, direction: str, speed: float) -> None:
         """Вспомогательный метод для чистого логирования."""
@@ -75,11 +76,11 @@ class TelemetryAnalyzer:
     async def _step(self) -> None:
         """Один шаг адаптации."""
         now = time.monotonic()
-        elapsed = min(1, now - self.ui.speed.last_checkpoint_time)
+        elapsed = min(1, now - self.last_checkpoint_time)
         if elapsed <= 0:
             return
 
-        speed_now = self.ui.speed.bytes_to_check / elapsed
+        speed_now = self.bytes_to_check / elapsed
         self.smoothed_speed = self._calculate_ema(speed_now, elapsed)
         self._update_window(speed_now, elapsed)
 
@@ -107,4 +108,4 @@ class TelemetryAnalyzer:
             )
             self.dynamic_limit = self.current_limit
 
-        self.ui.speed.last_checkpoint_time = time.monotonic()
+        self.last_checkpoint_time = time.monotonic()

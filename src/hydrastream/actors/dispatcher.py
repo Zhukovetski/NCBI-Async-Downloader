@@ -96,11 +96,11 @@ class BaseFileDispatcher(ABC):
 
 @my_dataclass
 class StreamFileDispatcher(BaseFileDispatcher):
-    file_discovery: asyncio.Queue[Envelope[File | None]]
+    file_discovery: asyncio.Queue[File | None]
 
     async def _prepare_file(self, file_obj: File) -> None:
         # Для стрима просто закидываем файл в трубу (имя не меняется)
-        await self.file_discovery.put(Envelope(payload=file_obj))
+        await self.file_discovery.put(file_obj)
 
     def _get_sort_key(self, file_id: int, current_pos: int) -> tuple[int, ...]:
         # СТРИМ: Сначала ID файла, потом позиция (Качаем файлы по очереди!)
@@ -122,7 +122,7 @@ class DiskFileDispatcher(BaseFileDispatcher):
         )
         if new_filename:
             file_obj.actual_filename = new_filename
-            update_filename(self.ui, file_obj.meta.original_filename, new_filename)
+            update_filename(self.ui, file_obj.meta.id, new_filename)
         else:
             file_obj.actual_filename = file_obj.meta.original_filename
 

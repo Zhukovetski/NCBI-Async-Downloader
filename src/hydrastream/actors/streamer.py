@@ -16,7 +16,7 @@ from hydrastream.models import (
 from hydrastream.monitor import done, log
 
 
-async def streamer(
+async def file_streamer(  # noqa
     file_obj: File,
     stream_chunk_inbox: asyncio.Queue[Envelope[StreamChunk | None]],
     credit_outbox: asyncio.Queue[int],
@@ -29,7 +29,7 @@ async def streamer(
     checksum = file_obj.meta.expected_checksum
     hasher: Hasher | None = hashlib.new(checksum.algorithm) if checksum else None
 
-    buffer: dict[int, bytes] = {}
+    buffer: dict[int, list[bytes]] = {}
     expected_offset = 0
 
     await log(ui, f"Streaming: {file_obj.actual_filename}", status=LogStatus.INFO)
@@ -48,25 +48,25 @@ async def streamer(
             chunk_data = stream_chunk.data
 
             if chunk_offset == expected_offset:
-                # 1. ОБНОВЛЯЕМ ХЭШ!
-                if hasher:
-                    hasher.update(chunk_data)
-
-                yield chunk_data
-                expected_offset += len(chunk_data)
-                await credit_outbox.put(len(chunk_data))
-
-                # Цепная реакция из буфера
-                while expected_offset in buffer:
-                    next_data = buffer.pop(expected_offset)
-
-                    # ОБНОВЛЯЕМ ХЭШ ДЛЯ ДАННЫХ ИЗ БУФЕРА!
+                for data in chunk_data:
                     if hasher:
-                        hasher.update(next_data)
+                        hasher.update(data)
 
-                    yield next_data
-                    expected_offset += len(next_data)
-                    await credit_outbox.put(len(next_data))
+                    yield data
+                    expected_offset += len(data)
+                    await credit_outbox.put(len(data))
+
+                    # Цепная реакция из буфера
+                    while expected_offset in buffer:
+                        next_data = buffer.pop(expected_offset)
+
+                        for n_data in next_data:
+                            if hasher:
+                                hasher.update(n_data)
+
+                            yield n_data
+                            expected_offset += len(n_data)
+                            await credit_outbox.put(len(n_data))
             else:
                 # Данные из будущего - просто кладем в буфер
                 buffer[chunk_offset] = chunk_data
@@ -90,7 +90,7 @@ async def streamer(
                     raise
 
             # Вызываем done ТОЛЬКО при успехе
-            await done(ui, file_obj.actual_filename)
+            await done(ui, file_obj.meta.id, file_obj.actual_filename)
 
     finally:
         # В finally оставляем ТОЛЬКО очистку ресурсов!

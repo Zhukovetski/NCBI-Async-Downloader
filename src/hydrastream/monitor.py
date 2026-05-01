@@ -31,6 +31,7 @@ from rich.rule import Rule
 from rich.table import Column, Table
 from rich.text import Text
 
+from hydrastream.actors.stater import GetUIDeltasCmd, StateKeeperCmd
 from hydrastream.exceptions import HydraError, LogFileError, LogStatus
 from hydrastream.models import File, UIState
 from hydrastream.utils import format_size
@@ -205,7 +206,9 @@ async def log_worker(ctx: UIState) -> None:
             break
 
 
-def add_file(ctx: UIState, filename: str, total_size: int | None = None) -> None:
+def add_file(
+    ctx: UIState, id: int, filename: str, total_size: int | None = None
+) -> None:
     if total_size is not None:
         ctx.progress.total_bytes += total_size
         ctx.progress.total_files += 1
@@ -220,7 +223,7 @@ def add_file(ctx: UIState, filename: str, total_size: int | None = None) -> None
             task_id = ctx.rich.progress.add_task(
                 "Download file", filename=t_filename, total=total_size, visible=False
             )
-        ctx.rich.tasks[filename] = task_id
+        ctx.rich.tasks[id] = task_id
         update_panel_title(ctx)
 
 
@@ -235,15 +238,15 @@ def update(ctx: UIState, filename: str, advance_bytes: int) -> None:
         ctx.speed.throttler_checkpoint_event.set()
 
 
-def update_filename(ctx: UIState, old_filename: str, new_filename: str) -> None:
+def update_filename(ctx: UIState, id: int, new_filename: str) -> None:
     if ctx.rich.progress:
-        ctx.rich.progress.update(ctx.rich.tasks[old_filename], description=new_filename)
-        ctx.rich.tasks[new_filename] = ctx.rich.tasks.pop(old_filename)
+        ctx.rich.progress.update(ctx.rich.tasks[id], description=new_filename)
 
 
-async def ui_refresh_actor(ctx: UIState, state_keeper_q: asyncio.Queue) -> None:
-    """Независимый цикл отрисовки (Render Loop)"""
-    reply_q = asyncio.Queue(maxsize=1)
+async def ui_refresh_actor(
+    ctx: UIState, state_keeper_q: asyncio.Queue[StateKeeperCmd]
+) -> None:
+    reply_q: asyncio.Queue[dict[int, int]] = asyncio.Queue(maxsize=1)
 
     if not ctx.rich.progress:
         return
@@ -259,16 +262,18 @@ async def ui_refresh_actor(ctx: UIState, state_keeper_q: asyncio.Queue) -> None:
 
             # 3. Отрисовываем!
             for file_id, bytes_to_advance in deltas.items():
-                if bytes_to_advance > 0 and file_id in ctx.rich.tasks:
-                    ctx.rich.progress.update(
-                        ctx.rich.tasks[file_id],
-                        advance=bytes_to_advance,
-                        visible=True,
-                    )
+                ctx.rich.buffer[file_id] += bytes_to_advance
+                ctx.progress.download_bytes += bytes_to_advance
 
-                    if file_id not in ctx.rich.active_files:
-                        ctx.rich.active_files.add(file_id)
-                        update_panel_title(ctx)
+                ctx.rich.progress.update(
+                    ctx.rich.tasks[file_id],
+                    advance=bytes_to_advance,
+                    visible=True,
+                )
+
+                if file_id not in ctx.rich.active_files:
+                    ctx.rich.active_files.add(file_id)
+                    update_panel_title(ctx)
 
         except Exception as e:
             if ctx.display.debug:
@@ -287,21 +292,21 @@ def update_panel_title(ctx: UIState) -> None:
     )
 
 
-async def done(ctx: UIState, filename: str) -> None:
-    if ctx.rich.progress and filename in ctx.rich.tasks:
-        task_id = ctx.rich.tasks[filename]
+async def done(ctx: UIState, id: int, filename: str) -> None:
+    if ctx.rich.progress and id in ctx.rich.tasks:
+        task_id = ctx.rich.tasks[id]
         ctx.rich.progress.update(
             task_id, completed=ctx.rich.progress.tasks[task_id].total, visible=False
         )
-        del ctx.rich.tasks[filename]
-        ctx.rich.active_files.discard(filename)
+        del ctx.rich.tasks[id]
+        ctx.rich.active_files.discard(id)
 
         if ctx.rich.progress.tasks[task_id].total is not None:
             ctx.progress.files_completed += 1
             update_panel_title(ctx)
             await log(ctx, f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
-    elif ctx.rich.buffer.get(filename, 0):
+    elif ctx.rich.buffer.get(id, 0):
         ctx.progress.files_completed += 1
         await log(ctx, f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
