@@ -27,7 +27,7 @@ class BaseFileDispatcher(ABC):
     limit: int
     current_files: int = 0
     files_inbox: asyncio.PriorityQueue[Envelope[File | None]]
-    file_limit_inbox: asyncio.Queue[object]
+    file_limit_inbox: asyncio.Queue[FileCompleted]
     chunks_outbox: asyncio.PriorityQueue[Envelope[Chunk | None]]
     num_memory_throtllers: int
     ui: UIState

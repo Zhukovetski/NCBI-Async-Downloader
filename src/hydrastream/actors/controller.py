@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import asyncio
+from typing import TypeAlias
 
 from hydrastream.models import my_dataclass
 
@@ -26,9 +27,14 @@ class ScaleDownSignal:
     pass
 
 
+TrafficSignal: TypeAlias = (
+    NetworkCongestionSignal | MaxLimitSignal | ScaleUpSignal | ScaleDownSignal
+)
+
+
 @my_dataclass
 class TrafficController:
-    reg_events_q: asyncio.Queue[object]
+    reg_events_q: asyncio.Queue[TrafficSignal]
     worker_events: list[asyncio.Event]
     stop_analyzer: asyncio.Event
     controller_checkpoint_event: asyncio.Event
@@ -44,20 +50,22 @@ class TrafficController:
         while True:
             msg = await self.reg_events_q.get()
 
-            if isinstance(msg, NetworkCongestionSignal | ScaleDownSignal):
-                self.dynamic_limit = max(1, self.dynamic_limit - 1)
+            match msg:
+                case NetworkCongestionSignal() | ScaleDownSignal():
+                    self.dynamic_limit = max(1, self.dynamic_limit - 1)
 
-            elif isinstance(msg, ScaleUpSignal):
-                self.dynamic_limit = min(
-                    len(self.worker_events), self.dynamic_limit + 1
-                )
+                case ScaleUpSignal():
+                    self.dynamic_limit = min(
+                        len(self.worker_events), self.dynamic_limit + 1
+                    )
 
-            elif isinstance(msg, MaxLimitSignal):
-                self.dynamic_limit = len(self.worker_events)
-                self._update_lights()
-                self.stop_analyzer.set()
-                self.controller_checkpoint_event.set()
-                break
+                case MaxLimitSignal():
+                    self.dynamic_limit = len(self.worker_events)
+                    self._update_lights()
+                    self.stop_analyzer.set()
+                    self.controller_checkpoint_event.set()
+
+                    break
 
             if self.dynamic_limit != self.prev_dynamic_limit:
                 self._update_lights()
