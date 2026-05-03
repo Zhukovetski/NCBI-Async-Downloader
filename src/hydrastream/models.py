@@ -583,20 +583,12 @@ T_co = TypeVar("T_co", covariant=True)
 class Envelope(Generic[T_co]):
     sort_key: tuple[int, ...] = field(default=(0,))
 
-    payload: T_co | None = field(compare=False, default=None)
-
-    msg: bool = field(compare=False, default=False)
-
-    is_poison_pill: bool = field(compare=False, default=False)
-    is_last_survivor: bool = field(compare=False, default=False)
+    payload: T_co = field(compare=False)
 
 
 @my_dataclass(frozen=True)
-class Cmd:
-    msg: bool = field(compare=False, default=False)
-
-    is_poison_pill: bool = field(compare=False, default=False)
-    is_last_survivor: bool = field(compare=False, default=False)
+class StopMsg:
+    pass
 
 
 @my_dataclass

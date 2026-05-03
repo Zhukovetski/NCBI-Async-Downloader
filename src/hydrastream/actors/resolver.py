@@ -3,14 +3,15 @@
 
 import asyncio
 import random
+import sys
 from abc import ABC, abstractmethod
+from typing import cast
 
 from curl_cffi import Headers, Response
 from curl_cffi.requests import RequestsError
 
 from hydrastream._curl_shim import get_error_response
 from hydrastream.actors.stater import ProgressDeltaCmd, RegisterFileCmd, StateKeeperCmd
-from hydrastream.engine import send_poison_pills
 from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import StorageBackend
 from hydrastream.models import (
@@ -20,6 +21,7 @@ from hydrastream.models import (
     FileMeta,
     LinkData,
     NetworkState,
+    StopMsg,
     TypeHash,
     UIState,
     my_dataclass,
@@ -35,15 +37,17 @@ class BaseMetadataResolver(ABC):
     threads: int
     MIN_CHUNK: int
 
-    links_inbox: asyncio.PriorityQueue[Envelope[LinkData | None]]
-    files_outbox: asyncio.PriorityQueue[Envelope[File | None]]
-    reg_events_outbox: asyncio.Queue[object]
+    links_inbox: asyncio.PriorityQueue[Envelope[LinkData | StopMsg]]
+    files_outbox: asyncio.PriorityQueue[Envelope[File | StopMsg]]
+    reg_events_outbox: asyncio.Queue[StateKeeperCmd]
 
-    num_dispathers: int
+    barrier: asyncio.Barrier
+
     all_complete: asyncio.Event
 
     is_dry_run: bool
     is_verify: bool
+    is_debug: bool
 
     ui: UIState
     net: NetworkState
@@ -53,39 +57,55 @@ class BaseMetadataResolver(ABC):
         checksum = None
         while True:
             envelope = await self.links_inbox.get()
+            msg = envelope.payload
 
-            if envelope.is_poison_pill:
-                if envelope.is_last_survivor:
-                    await send_poison_pills(self.files_outbox, self.num_dispathers)
-                    if self.is_dry_run:
-                        self.all_complete.set()
-                break
+            match msg:
+                case LinkData() as data:
+                    envelope = cast(Envelope[LinkData], envelope)
 
-            if not (data := envelope.payload):
-                continue
+                    try:
+                        meta = await self._fetch_metadata(data.url)
+                        filename, total_size, supports_ranges = meta
 
-            try:
-                meta = await self._fetch_metadata(data.url)
-                filename, total_size, supports_ranges = meta
+                        if self.is_verify and not data.checksum:
+                            checksum = await self._resolve_hash(
+                                data.id, data.url, filename, data.checksum
+                            )
 
-                if self.is_verify and not data.checksum:
-                    checksum = await self._resolve_hash(
-                        data.id, data.url, filename, data.checksum
+                        file_obj = await self._prepare_file_object(
+                            data=data,
+                            filename=filename,
+                            total_size=total_size,
+                            supports_ranges=supports_ranges,
+                            checksum=checksum,
+                        )
+
+                        await self._register_file(file_obj)
+
+                    except Exception as e:
+                        await self._handle_error(e, envelope)
+
+                case StopMsg():
+                    position = await self.barrier.wait()
+
+                    if position == 0:
+                        await self.files_outbox.put(
+                            Envelope(sort_key=(sys.maxsize,), payload=StopMsg())
+                        )
+                        if self.is_dry_run:
+                            self.all_complete.set()
+                    break
+
+                case _:
+                    if self.is_debug:
+                        raise RuntimeError(
+                            f"Unknown message type in links_inbox: {type(msg)}"
+                        )
+                    await log(
+                        self.ui,
+                        f"Received unknown message: {msg}",
+                        status=LogStatus.ERROR,
                     )
-
-                # ВЫЗЫВАЕМ АБСТРАКТНЫЙ МЕТОД (Делегируем создание наследнику)
-                file_obj = await self._prepare_file_object(
-                    data=data,
-                    filename=filename,
-                    total_size=total_size,
-                    supports_ranges=supports_ranges,
-                    checksum=checksum,
-                )
-
-                await self._register_file(file_obj)
-
-            except Exception as e:
-                await self._handle_error(e, envelope, data)
 
     async def _register_file(self, file_obj: File) -> None:
         """Общая логика регистрации, внутри которой есть ХУК для наследников."""
@@ -121,8 +141,7 @@ class BaseMetadataResolver(ABC):
     async def _handle_error(
         self,
         e: Exception,
-        envelope: Envelope[LinkData | None],
-        data: LinkData,
+        envelope: Envelope[LinkData],
     ) -> None:
         """Возвращает True, если нужно пропустить итерацию (continue)."""
 
@@ -135,7 +154,7 @@ class BaseMetadataResolver(ABC):
                 if status in {400, 401, 403, 404, 410, 416}:
                     await log(
                         self.ui,
-                        f"Link {redact_url(data.url)} failed permanently "
+                        f"Link {redact_url(envelope.payload.url)} failed permanently "
                         f"(HTTP {status}).",
                         status=LogStatus.ERROR,
                     )
@@ -157,11 +176,9 @@ class BaseMetadataResolver(ABC):
 
     async def _requeue_chunk(
         self,
-        envelope: Envelope[LinkData | None] | None,
+        envelope: Envelope[LinkData],
         delay_range: tuple[float, float] = (1.0, 3.0),
     ) -> None:
-        if envelope is None:
-            return
         await self.links_inbox.put(envelope)
         delay = random.uniform(*delay_range)
         await asyncio.sleep(delay)

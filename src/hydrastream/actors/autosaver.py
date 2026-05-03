@@ -3,10 +3,17 @@
 
 import asyncio
 
-from hydrastream.actors.stater import GetSnapshotCmd
+from hydrastream.actors.aggregator import FlushCmd
+from hydrastream.actors.stater import GetSnapshotCmd, StateKeeperCmd
 from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import StorageBackend
-from hydrastream.models import Envelope, File, UIState, WriteChunk, my_dataclass
+from hydrastream.models import (
+    File,
+    StopMsg,
+    UIState,
+    WriteChunk,
+    my_dataclass,
+)
 from hydrastream.monitor import log
 
 
@@ -14,8 +21,8 @@ from hydrastream.monitor import log
 class FileAutosaver:
     all_complete: asyncio.Event
     flush_event: asyncio.Event
-    disk_q: asyncio.PriorityQueue[Envelope[WriteChunk | None]]
-    reg_events_q: asyncio.Queue[object]
+    disk_q: asyncio.Queue[WriteChunk | FlushCmd | StopMsg]
+    reg_events_q: asyncio.Queue[StateKeeperCmd]
     get_shapshot: asyncio.Queue[dict[int, File]]
     fs: StorageBackend
     ui: UIState
@@ -33,7 +40,7 @@ class FileAutosaver:
             except TimeoutError:
                 try:
                     self.flush_event.clear()
-                    await self.disk_q.put(Envelope(sort_key=(-1,), msg=True))
+                    await self.disk_q.put(FlushCmd())
                     await self.reg_events_q.put(
                         GetSnapshotCmd(reply_to=self.get_shapshot)
                     )

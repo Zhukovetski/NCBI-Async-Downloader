@@ -6,15 +6,24 @@ import os
 import random
 import traceback
 from abc import ABC, abstractmethod
+from typing import cast
 
 from curl_cffi import Response
 from curl_cffi.requests import RequestsError
 
 from hydrastream._curl_shim import aiter_bytes, get_error_response
-from hydrastream.actors.controller import MaxLimitSignal, NetworkCongestionSignal
+from hydrastream.actors.controller import (
+    MaxLimitSignal,
+    NetworkCongestionSignal,
+    TrafficSignal,
+)
 from hydrastream.actors.dispatcher import FileCompleted
 from hydrastream.actors.stater import ProgressDeltaCmd, RemoveFileCmd, StateKeeperCmd
-from hydrastream.actors.throttler import RegisterStreamCmd, RemoveStreamCmd
+from hydrastream.actors.throttler import (
+    RegisterStreamCmd,
+    RemoveStreamCmd,
+    ThrottlerMsg,
+)
 from hydrastream.exceptions import (
     DownloadFailedError,
     LogStatus,
@@ -24,9 +33,10 @@ from hydrastream.exceptions import (
 from hydrastream.interfaces import StorageBackend
 from hydrastream.models import (
     Chunk,
-    Cmd,
     Envelope,
+    File,
     NetworkState,
+    StopMsg,
     StreamChunk,
     UIState,
     WriteChunk,
@@ -38,13 +48,15 @@ from hydrastream.network import stream_chunk, try_scale_up
 
 @my_dataclass
 class BaseDownloadWorker(ABC):
-    chunks_inbox: asyncio.PriorityQueue[Envelope[Chunk | None]]
-    throttler_outbox: asyncio.Queue[object] | None = None
-    controller_outbox: asyncio.Queue[object]
+    chunks_inbox: asyncio.PriorityQueue[Envelope[Chunk | StopMsg]]
+    throttler_outbox: asyncio.Queue[ThrottlerMsg] | None = None
+    controller_outbox: asyncio.Queue[TrafficSignal]
     state_outbox: asyncio.Queue[StateKeeperCmd]
 
     wakeup_event: asyncio.Event
     all_complete: asyncio.Event
+
+    barrier: asyncio.Barrier
 
     ui: UIState
     net: NetworkState
@@ -79,32 +91,47 @@ class BaseDownloadWorker(ABC):
             except Exception as e:
                 await self.handle_worker_error(envelope, chunk, e)
 
-    async def get_chunk(self) -> tuple[Envelope[Chunk | None] | None, Chunk | None]:
+    async def get_chunk(self) -> tuple[Envelope[Chunk] | None, Chunk | None]:
         envelope = await self.chunks_inbox.get()
+        msg = envelope.payload
 
-        if envelope.is_poison_pill:
-            await self.controller_outbox.put(MaxLimitSignal())
+        match msg:
+            case Chunk() as chunk:
+                envelope = cast(Envelope[Chunk], envelope)
 
-            if envelope.is_last_survivor:
-                await self._finally()
+                file_obj = chunk.file
+                if not file_obj or file_obj.is_failed:
+                    return envelope, None
 
-            return None, None
+                return envelope, chunk
+            case StopMsg():
+                await self.controller_outbox.put(MaxLimitSignal())
 
-        if not (chunk := envelope.payload):
-            return envelope, None
+                position = await self.barrier.wait()
 
-        file_obj = chunk.file
-        if not file_obj or file_obj.is_failed:
-            return envelope, None
+                if position == 0:
+                    await self._finally()
 
-        return envelope, chunk
+                return None, None
+
+            case _:
+                if self.is_debug:
+                    raise RuntimeError(
+                        f"Unknown message type in links_inbox: {type(msg)}"
+                    )
+                await log(
+                    self.ui,
+                    f"Received unknown message: {msg}",
+                    status=LogStatus.ERROR,
+                )
+                return envelope, None
 
     @abstractmethod
     async def _finally(self) -> None:
         pass
 
     async def handle_worker_error(
-        self, envelope: Envelope[Chunk | None], chunk: Chunk, e: Exception
+        self, envelope: Envelope[Chunk], chunk: Chunk, e: Exception
     ) -> None:
         if isinstance(e, WorkerScaleDown):
             await self.chunks_inbox.put(envelope)
@@ -135,7 +162,7 @@ class BaseDownloadWorker(ABC):
         raise e
 
     async def _handle_requests_error(
-        self, envelope: Envelope[Chunk | None], chunk: Chunk, e: RequestsError
+        self, envelope: Envelope[Chunk], chunk: Chunk, e: RequestsError
     ) -> None:
         """Разбирает сетевые ошибки и решает: убить файл или переповторить чанк."""
         response = get_error_response(e)
@@ -165,7 +192,7 @@ class BaseDownloadWorker(ABC):
     @abstractmethod
     async def requeue_chunk(
         self,
-        envelope: Envelope[Chunk | None],
+        envelope: Envelope[Chunk],
         chunk: Chunk,
         delay_range: tuple[float, float] = (1.0, 3.0),
     ) -> None:
@@ -185,11 +212,11 @@ class BaseDownloadWorker(ABC):
 
 @my_dataclass
 class StreamDownloadWorker(BaseDownloadWorker):
-    stream_chunks_outbox: asyncio.PriorityQueue[Envelope[StreamChunk | None]]
-    file_discovery_outbox: asyncio.Queue[None]
+    stream_chunks_outbox: asyncio.PriorityQueue[Envelope[StreamChunk | StopMsg]]
+    file_discovery_outbox: asyncio.Queue[File | StopMsg]
 
     async def _finally(self) -> None:
-        await self.file_discovery_outbox.put(None)
+        await self.file_discovery_outbox.put(StopMsg())
 
         self.all_complete.set()
 
@@ -204,7 +231,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
 
     async def requeue_chunk(
         self,
-        envelope: Envelope[Chunk | None],
+        envelope: Envelope[Chunk],
         chunk: Chunk,
         delay_range: tuple[float, float] = (1.0, 3.0),
     ) -> None:
@@ -284,15 +311,15 @@ class StreamDownloadWorker(BaseDownloadWorker):
 
 @my_dataclass
 class DiskDownloadWorker(BaseDownloadWorker):
-    disk_outbox: asyncio.Queue[WriteChunk | Cmd]
-    reg_events_outbox: asyncio.Queue[object]
-    file_limit_outbox: asyncio.Queue[object]
+    disk_outbox: asyncio.Queue[WriteChunk | StopMsg]
+    reg_events_outbox: asyncio.Queue[StateKeeperCmd]
+    file_limit_outbox: asyncio.Queue[FileCompleted]
 
     fs: StorageBackend
 
     async def _finally(self) -> None:
         self.all_complete.set()
-        await self.disk_outbox.put(Cmd(is_poison_pill=True, is_last_survivor=True))
+        await self.disk_outbox.put(StopMsg())
 
     async def _handle_critical_requests_error(
         self, chunk: Chunk, response: Response
@@ -302,7 +329,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
 
     async def requeue_chunk(
         self,
-        envelope: Envelope[Chunk | None],
+        envelope: Envelope[Chunk],
         chunk: Chunk,
         delay_range: tuple[float, float] = (1.0, 3.0),
     ) -> None:

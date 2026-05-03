@@ -6,10 +6,9 @@ import contextlib
 import math
 import random
 import signal
-import sys
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, TypeVarTuple, Unpack
+from typing import TypeVarTuple, Unpack
 
 from hydrastream.actors.autosaver import autosaver, save_all_states
 from hydrastream.actors.controller import AdaptiveEngine
@@ -27,33 +26,6 @@ from hydrastream.models import Checksum, Envelope, HydraContext, TypeHash
 from hydrastream.monitor import log, print_dry_run_report, ui_start, ui_stop
 
 Ts = TypeVarTuple("Ts")
-
-
-async def send_poison_pills(
-    queue: asyncio.PriorityQueue[Envelope[Any | None]]
-    | asyncio.Queue[Envelope[Any | None]],
-    count: int = 1,
-    envelope_factory: Callable[[int, bool], Envelope[None]] | None = None,
-) -> None:
-
-    factory: Callable[[int, bool], Envelope[None]]
-
-    if envelope_factory is None:
-
-        def _default_factory(i: int, last: bool) -> Envelope[None]:
-            return Envelope(
-                sort_key=(sys.maxsize - i,), is_poison_pill=True, is_last_survivor=last
-            )
-
-        factory = _default_factory
-    else:
-        factory = envelope_factory
-
-    for i in range(count - 1, 0, -1):
-        await queue.put(factory(i, False))
-
-    # Последняя "выжившая" пилюля
-    await queue.put(factory(0, True))
 
 
 async def delayed_task(

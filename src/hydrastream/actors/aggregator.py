@@ -1,58 +1,97 @@
 import asyncio
+from dataclasses import field
 
-from hydrastream.actors.throttler import DiskBufferClearedSignal, DiskBufferFullSignal
-from hydrastream.models import Cmd, WriteChunk, my_dataclass
+from hydrastream.actors.throttler import (
+    DiskBufferClearedSignal,
+    DiskBufferFullSignal,
+    ThrottlerMsg,
+)
+from hydrastream.actors.writer import WriteCompleted
+from hydrastream.exceptions import LogStatus
+from hydrastream.models import StopMsg, UIState, WriteChunk, my_dataclass
+from hydrastream.monitor import log
+
+
+@my_dataclass
+class FlushCmd:
+    pass
 
 
 @my_dataclass
 class DiskAggregator:
-    disk_inbox: asyncio.Queue[WriteChunk | Cmd]
-    throttler_outbox: asyncio.Queue[object]
-    ack_inbox: asyncio.Queue[object]
-    writer_outbox: asyncio.Queue[list[WriteChunk] | None]
+    disk_inbox: asyncio.Queue[WriteChunk | FlushCmd | StopMsg]
+    throttler_outbox: asyncio.Queue[ThrottlerMsg]
+    ack_inbox: asyncio.Queue[WriteCompleted | StopMsg]
+    writer_outbox: asyncio.Queue[list[WriteChunk] | StopMsg]
     flush_event: asyncio.Event
     MAX_BUFFER: int
 
+    ui: UIState
+    is_debug: bool
+
+    current_buffer: list[WriteChunk] = field(default_factory=list[WriteChunk])
+    current_size: int = 0
+    is_writing_now: bool = False
+
     async def run(self) -> None:
-        current_buffer: list[WriteChunk] = []
-        current_size = 0
-        is_writing_now = False
 
         while True:
             msg = await self.disk_inbox.get()
 
-            is_control_msg = isinstance(msg, Cmd)
-            is_poison_pill = is_control_msg and msg.is_poison_pill
+            match msg:
+                case WriteChunk():
+                    self.current_buffer.append(msg)
+                    self.current_size += msg.length
 
-            if isinstance(msg, WriteChunk):
-                current_buffer.append(msg)
-                current_size += msg.length
+                    if self.current_size >= self.MAX_BUFFER:
+                        await self._persist_buffer()
 
-            needs_flush = (current_size >= self.MAX_BUFFER) or is_control_msg
-
-            if needs_flush:
-                if is_writing_now:
-                    await self.throttler_outbox.put(DiskBufferFullSignal())
-
-                    await self.ack_inbox.get()
-                    is_writing_now = False
-
-                    await self.throttler_outbox.put(DiskBufferClearedSignal())
-
-                if current_buffer:
-                    coalesced_batch = await self._coalesce(current_buffer)
-                    await self.writer_outbox.put(coalesced_batch)
-
-                    is_writing_now = True
-                    current_buffer.clear()
-                    current_size = 0
-
-                if is_control_msg:
-                    if is_poison_pill:
-                        await self.writer_outbox.put(None)
-                        break
+                case FlushCmd():
+                    await self._persist_buffer()
 
                     self.flush_event.set()
+
+                case StopMsg():
+                    await self._persist_buffer()
+
+                    await self.writer_outbox.put(StopMsg())
+                    break
+
+                case _:
+                    if self.is_debug:
+                        raise RuntimeError(
+                            f"Unknown message type in disk_inbox: {type(msg)}"
+                        )
+                    await log(
+                        self.ui,
+                        f"Received unknown message: {msg}",
+                        status=LogStatus.ERROR,
+                    )
+
+    async def _persist_buffer(self) -> None:
+
+        if self.is_writing_now:
+            await self.throttler_outbox.put(DiskBufferFullSignal())
+
+            try:
+                async with asyncio.timeout(60.0):
+                    await self.ack_inbox.get()
+
+            except TimeoutError as e:
+                raise RuntimeError(
+                    "DiskWriter stopped responding! Hardware failure?"
+                ) from e
+
+            self.is_writing_now = False
+            await self.throttler_outbox.put(DiskBufferClearedSignal())
+
+        if self.current_buffer:
+            batch = await self._coalesce(self.current_buffer)
+            await self.writer_outbox.put(batch)
+
+            self.is_writing_now = True
+            self.current_buffer.clear()
+            self.current_size = 0
 
     async def _coalesce(self, batch_bytes: list[WriteChunk]) -> list[WriteChunk]:
 

@@ -2,15 +2,16 @@
 # Licensed under the MIT License.
 
 import asyncio
+import sys
 from abc import ABC, abstractmethod
 
-from hydrastream.engine import send_poison_pills
 from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import StorageBackend
 from hydrastream.models import (
     Chunk,
     Envelope,
     File,
+    StopMsg,
     UIState,
     my_dataclass,
 )
@@ -26,62 +27,76 @@ class FileCompleted:
 class BaseFileDispatcher(ABC):
     limit: int
     current_files: int = 0
-    files_inbox: asyncio.PriorityQueue[Envelope[File | None]]
+
+    files_inbox: asyncio.PriorityQueue[Envelope[File | StopMsg]]
+    chunks_outbox: asyncio.PriorityQueue[Envelope[Chunk | StopMsg]]
     file_limit_inbox: asyncio.Queue[FileCompleted]
-    chunks_outbox: asyncio.PriorityQueue[Envelope[Chunk | None]]
-    num_memory_throtllers: int
+
     ui: UIState
 
+    is_debug: bool
+
     async def run(self) -> None:
-        pending_file: Envelope[File | None] | None = None
+        pending_file: Envelope[File | StopMsg] | None = None
 
         while True:
             if pending_file is None:
-                pending_file = await self.files_inbox.get()
+                envelope = await self.files_inbox.get()
+                msg = envelope.payload
 
-                if pending_file.is_poison_pill:
-                    await send_poison_pills(
-                        self.chunks_outbox, self.num_memory_throtllers
-                    )
-                    break
+                match msg:
+                    case File() as file_obj:
+                        if self.current_files >= self.limit:
+                            await self.file_limit_inbox.get()
+                            self.current_files -= 1
+                            continue
 
-                if not (file_obj := pending_file.payload):
-                    continue
+                        self.current_files += 1
 
-                if self.current_files >= self.limit:
-                    await self.file_limit_inbox.get()
-                    self.current_files -= 1
-                    continue
+                        # 1. ВЫЗЫВАЕМ СПЕЦИФИЧНУЮ ПОДГОТОВКУ
+                        await self._prepare_file(file_obj)
 
-                self.current_files += 1
-
-                # 1. ВЫЗЫВАЕМ СПЕЦИФИЧНУЮ ПОДГОТОВКУ
-                await self._prepare_file(file_obj)
-
-                # 2. ОБЩАЯ ЛОГИКА ДЛЯ ВСЕХ (Пишем лог, если имя поменялось)
-                if file_obj.meta.original_filename != file_obj.actual_filename:
-                    await log(
-                        self.ui,
-                        f"{file_obj.meta.original_filename} already exists. "
-                        f"Saving as {file_obj.actual_filename}.",
-                        status=LogStatus.WARNING,
-                    )
-
-                # 3. Создаем чанки
-                file_obj.create_chunks()
-
-                for c in file_obj.chunks:
-                    if c.current_pos <= c.end:
-                        await self.chunks_outbox.put(
-                            Envelope(
-                                # 4. ВЫЗЫВАЕМ СПЕЦИФИЧНУЮ СОРТИРОВКУ
-                                sort_key=self._get_sort_key(
-                                    file_obj.meta.id, c.current_pos
-                                ),
-                                payload=c,
+                        # 2. ОБЩАЯ ЛОГИКА ДЛЯ ВСЕХ (Пишем лог, если имя поменялось)
+                        if file_obj.meta.original_filename != file_obj.actual_filename:
+                            await log(
+                                self.ui,
+                                f"{file_obj.meta.original_filename} already exists. "
+                                f"Saving as {file_obj.actual_filename}.",
+                                status=LogStatus.WARNING,
                             )
+
+                        # 3. Создаем чанки
+                        file_obj.create_chunks()
+
+                        for c in file_obj.chunks:
+                            if c.current_pos <= c.end:
+                                await self.chunks_outbox.put(
+                                    Envelope(
+                                        # 4. ВЫЗЫВАЕМ СПЕЦИФИЧНУЮ СОРТИРОВКУ
+                                        sort_key=self._get_sort_key(
+                                            file_obj.meta.id, c.current_pos
+                                        ),
+                                        payload=c,
+                                    )
+                                )
+                        pending_file = None
+
+                    case StopMsg():
+                        await self.chunks_outbox.put(
+                            Envelope(sort_key=(sys.maxsize,), payload=StopMsg())
                         )
-                pending_file = None
+                        break
+
+                    case _:
+                        if self.is_debug:
+                            raise RuntimeError(
+                                f"Unknown message type in files_inbox: {type(msg)}"
+                            )
+                        await log(
+                            self.ui,
+                            f"Received unknown message: {msg}",
+                            status=LogStatus.ERROR,
+                        )
 
     @abstractmethod
     async def _prepare_file(self, file_obj: File) -> None:

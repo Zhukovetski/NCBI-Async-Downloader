@@ -3,13 +3,14 @@ import hashlib
 from collections.abc import AsyncGenerator
 
 from hydrastream.actors.dispatcher import FileCompleted
-from hydrastream.actors.stater import RemoveFileCmd
+from hydrastream.actors.stater import RemoveFileCmd, StateKeeperCmd
 from hydrastream.exceptions import FileSizeMismatchError, HashMismatchError, LogStatus
 from hydrastream.interfaces import Hasher
 from hydrastream.models import (
     Checksum,
     Envelope,
     File,
+    StopMsg,
     StreamChunk,
     UIState,
 )
@@ -18,11 +19,12 @@ from hydrastream.monitor import done, log
 
 async def file_streamer(  # noqa
     file_obj: File,
-    stream_chunk_inbox: asyncio.Queue[Envelope[StreamChunk | None]],
+    stream_chunk_inbox: asyncio.PriorityQueue[Envelope[StreamChunk | StopMsg]],
     credit_outbox: asyncio.Queue[int],
-    reg_events_q: asyncio.Queue[object],
-    file_limit_q: asyncio.Queue[object],
+    reg_events_q: asyncio.Queue[StateKeeperCmd],
+    file_limit_q: asyncio.Queue[FileCompleted],
     ui: UIState,
+    is_debug: bool,
 ) -> AsyncGenerator[bytes, None]:
 
     total_size = file_obj.meta.content_length
@@ -37,42 +39,47 @@ async def file_streamer(  # noqa
     try:
         while expected_offset < total_size:
             envelope = await stream_chunk_inbox.get()
+            msg = envelope.payload
 
-            if envelope.is_poison_pill:
-                break
-
-            if not (stream_chunk := envelope.payload):
-                continue
-
-            chunk_offset = stream_chunk.start
-            chunk_data = stream_chunk.data
-
-            if chunk_offset == expected_offset:
-                for data in chunk_data:
-                    if hasher:
-                        hasher.update(data)
-
-                    yield data
-                    expected_offset += len(data)
-                    await credit_outbox.put(len(data))
-
-                    # Цепная реакция из буфера
-                    while expected_offset in buffer:
-                        next_data = buffer.pop(expected_offset)
-
-                        for n_data in next_data:
+            match msg:
+                case StreamChunk(start=offset, data=chunk_data):
+                    if offset == expected_offset:
+                        for data in chunk_data:
                             if hasher:
-                                hasher.update(n_data)
+                                hasher.update(data)
 
-                            yield n_data
-                            expected_offset += len(n_data)
-                            await credit_outbox.put(len(n_data))
-            else:
-                # Данные из будущего - просто кладем в буфер
-                buffer[chunk_offset] = chunk_data
+                            yield data
+                            expected_offset += len(data)
+                            await credit_outbox.put(len(data))
+
+                            while expected_offset in buffer:
+                                next_data = buffer.pop(expected_offset)
+
+                                for n_data in next_data:
+                                    if hasher:
+                                        hasher.update(n_data)
+
+                                    yield n_data
+                                    expected_offset += len(n_data)
+                                    await credit_outbox.put(len(n_data))
+                    else:
+                        buffer[offset] = chunk_data
+
+                case StopMsg():
+                    break
+
+                case _:
+                    if is_debug:
+                        raise RuntimeError(
+                            f"Unknown message type in stream_chunk_inbox: {type(msg)}"
+                        )
+                    await log(
+                        ui,
+                        f"Received unknown message: {msg}",
+                        status=LogStatus.ERROR,
+                    )
 
         else:
-            # Успешное завершение цикла (все байты получены)
             if hasher and checksum:
                 try:
                     verify_stream(
@@ -89,14 +96,11 @@ async def file_streamer(  # noqa
                     await log(ui, str(e), status=LogStatus.ERROR)
                     raise
 
-            # Вызываем done ТОЛЬКО при успехе
             await done(ui, file_obj.meta.id, file_obj.actual_filename)
 
     finally:
-        # В finally оставляем ТОЛЬКО очистку ресурсов!
         buffer.clear()
 
-        # Сигнализируем системе, что файл отработан (освобождаем лимиты)
         await reg_events_q.put(RemoveFileCmd(file_id=file_obj.meta.id))
         await file_limit_q.put(FileCompleted())
 

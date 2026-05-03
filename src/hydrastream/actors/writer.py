@@ -4,37 +4,59 @@ import os
 
 from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import StorageBackend
-from hydrastream.models import UIState, WriteChunk, my_dataclass
+from hydrastream.models import StopMsg, UIState, WriteChunk, my_dataclass
 from hydrastream.monitor import log
+
+
+@my_dataclass(frozen=True)
+class WriteCompleted:
+    pass
 
 
 @my_dataclass
 class DiskWriter:
-    writer_inbox: asyncio.Queue[list[WriteChunk] | None]
-    ack_outbox: asyncio.Queue[bool]
+    writer_inbox: asyncio.Queue[list[WriteChunk] | StopMsg]
+    ack_outbox: asyncio.Queue[WriteCompleted | StopMsg]
 
     fs: StorageBackend
     ui: UIState
 
+    is_debug: bool
+
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
         while True:
-            batch = await self.writer_inbox.get()
-            if batch is None:
-                break
-            try:
-                await loop.run_in_executor(None, self._write_all_sync, batch)
+            msg = await self.writer_inbox.get()
 
-                await self.ack_outbox.put(True)
+            match msg:
+                case list() as batch:
+                    try:
+                        await loop.run_in_executor(None, self._write_all_sync, batch)
 
-            except Exception as e:
-                msg = self._handle_disk_error(e)
-                await log(
-                    self.ui,
-                    f"Disk Write Failure: {msg}",
-                    status=LogStatus.CRITICAL,
-                )
-                raise RuntimeError(msg) from e
+                        await self.ack_outbox.put(WriteCompleted())
+
+                    except Exception as e:
+                        msg = self._handle_disk_error(e)
+                        await log(
+                            self.ui,
+                            f"Disk Write Failure: {msg}",
+                            status=LogStatus.CRITICAL,
+                        )
+                        raise RuntimeError(msg) from e
+
+                case StopMsg():
+                    break
+
+                case _:
+                    if self.is_debug:
+                        raise RuntimeError(
+                            f"Unknown message type in writer_inbox: {type(msg)}"
+                        )
+                    await log(
+                        self.ui,
+                        f"Received unknown message: {msg}",
+                        status=LogStatus.ERROR,
+                    )
 
     def _write_all_sync(self, coalesced: list[WriteChunk]) -> None:
         for chunk in coalesced:

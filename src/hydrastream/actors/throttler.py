@@ -10,7 +10,7 @@ from curl_cffi import CurlOpt, Response
 from hydrastream.exceptions import (
     LogStatus,
 )
-from hydrastream.models import UIState, my_dataclass
+from hydrastream.models import StopMsg, UIState, my_dataclass
 from hydrastream.monitor import log
 
 
@@ -45,12 +45,14 @@ ThrottlerMsg: TypeAlias = (
     | DiskBufferFullSignal
     | DiskBufferClearedSignal
     | CheckpointReachedCmd
-    | None
+    | StopMsg
 )
 
 
 @my_dataclass
 class ThrottleController:
+    throttler_input: asyncio.Queue[ThrottlerMsg]
+
     active_stream: set[Response]
 
     speed_limit: float | None
@@ -67,7 +69,6 @@ class ThrottleController:
     all_complete: asyncio.Event
     throttler_checkpoint_event: asyncio.Event
 
-    throttler_input: asyncio.Queue[ThrottlerMsg]
     is_disk_choked: bool = False
 
     def __post_init__(self) -> None:
@@ -88,9 +89,6 @@ class ThrottleController:
                 msg = await self.throttler_input.get()
 
                 match msg:
-                    case None:
-                        break
-
                     case RegisterStreamCmd(stream=s):
                         self.active_stream.add(s)
                         # Если диск УЖЕ тупит, сразу режем скорость новичку!
@@ -113,6 +111,20 @@ class ThrottleController:
                     case CheckpointReachedCmd():
                         # Пришла порция байтов для ограничения скорости юзера
                         await self.enforce_throttling()
+
+                    case StopMsg():
+                        break
+
+                    case _:
+                        if self.is_debug:
+                            raise RuntimeError(
+                                f"Unknown message type in throttler_input: {type(msg)}"
+                            )
+                        await log(
+                            self.ui,
+                            f"Received unknown message: {msg}",
+                            status=LogStatus.ERROR,
+                        )
 
             except Exception as e:
                 if self.is_debug:

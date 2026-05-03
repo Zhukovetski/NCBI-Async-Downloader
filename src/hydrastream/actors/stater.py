@@ -3,7 +3,9 @@ from collections import defaultdict
 from dataclasses import field
 from typing import TypeAlias
 
-from hydrastream.models import File, my_dataclass
+from hydrastream.exceptions import LogStatus
+from hydrastream.models import File, StopMsg, UIState, my_dataclass
+from hydrastream.monitor import log
 
 
 @my_dataclass(frozen=True)
@@ -39,13 +41,13 @@ StateKeeperCmd: TypeAlias = (
     | GetSnapshotCmd
     | ProgressDeltaCmd
     | GetUIDeltasCmd
-    | None
+    | StopMsg
 )
 
 
 @my_dataclass
 class StateKeeperActor:
-    inbox: asyncio.Queue[StateKeeperCmd]
+    stater_inbox: asyncio.Queue[StateKeeperCmd]
 
     _files: dict[int, File] = field(default_factory=dict[int, File])
     _ui_deltas: defaultdict[int, int] = field(default_factory=lambda: defaultdict(int))
@@ -58,13 +60,14 @@ class StateKeeperActor:
     analyzer_checkpoint_event: asyncio.Event
     throttler_checkpoint_event: asyncio.Event
 
+    ui: UIState
+
+    is_debug: bool
+
     async def run(self) -> None:
         while True:
-            cmd = await self.inbox.get()
+            cmd = await self.stater_inbox.get()
             match cmd:
-                case None:
-                    break
-
                 case RegisterFileCmd(file_id=fid, file_obj=fobj):
                     self._files[fid] = fobj
 
@@ -91,5 +94,16 @@ class StateKeeperActor:
                     await queue.put(dict(self._ui_deltas))
                     self._ui_deltas.clear()
 
+                case StopMsg():
+                    break
+
                 case _:
-                    pass
+                    if self.is_debug:
+                        raise RuntimeError(
+                            f"Unknown message type in stater_inbox: {type(cmd)}"
+                        )
+                    await log(
+                        self.ui,
+                        f"Received unknown message: {cmd}",
+                        status=LogStatus.ERROR,
+                    )
